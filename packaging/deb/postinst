@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    if ! id ridgewarden-radar >/dev/null 2>&1; then
+        adduser --system --group --home /var/lib/ridgewarden-radar --no-create-home ridgewarden-radar
+    fi
+    adduser ridgewarden-radar ridgewarden >/dev/null
+    install -d -m 750 -o ridgewarden-radar -g ridgewarden-radar /var/lib/ridgewarden-radar
+    # an upgrade from when apps ran as the core's user leaves files it owned
+    chown -R ridgewarden-radar:ridgewarden-radar /var/lib/ridgewarden-radar
+    if [ ! -f /etc/ridgewarden/radar.toml ]; then
+        /usr/bin/ridgewarden-radar --config /etc/ridgewarden/radar.toml init
+    fi
+    # its webhook URLs and passphrases are for this app only, not the other apps
+    # in the ridgewarden group
+    chown root:ridgewarden-radar /etc/ridgewarden/radar.toml
+    chmod 640 /etc/ridgewarden/radar.toml
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        # start once the core is set up; until then there's nothing to follow
+        if [ -f /etc/ridgewarden/ridgewarden.toml ]; then
+            systemctl enable ridgewarden-radar >/dev/null 2>&1 || true
+            systemctl restart ridgewarden-radar || true
+        fi
+    fi
+fi
