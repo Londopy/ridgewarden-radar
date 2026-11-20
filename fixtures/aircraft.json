@@ -1,0 +1,10 @@
+{ "now" : 1795000000.4,
+  "messages" : 2841022,
+  "aircraft" : [
+    {"hex":"a1b2c3","type":"adsb_icao","flight":"TST101  ","alt_baro":34000,"alt_geom":34575,"gs":451.3,"track":88.4,"baro_rate":0,"geom_rate":-32,"squawk":"1234","category":"A3","lat":39.612345,"lon":-104.702211,"nic":8,"rc":186,"seen_pos":0.4,"version":2,"nac_p":9,"nac_v":1,"sil":3,"sil_type":"perhour","mlat":[],"tisb":[],"messages":1520,"seen":0.1,"rssi":-14.2},
+    {"hex":"a0f00d","type":"adsb_icao","alt_baro":"ground","gs":12.0,"track":270.0,"lat":39.55,"lon":-104.85,"seen_pos":1.0,"mlat":[],"tisb":[],"messages":88,"seen":0.9,"rssi":-20.5},
+    {"hex":"~2a01f4","type":"tisb_other","flight":"TST7    ","alt_baro":6500,"gs":140.0,"track":181.0,"baro_rate":-640,"lat":39.4,"lon":-104.9,"seen_pos":2.5,"mlat":[],"tisb":["lat","lon","altitude"],"messages":12,"seen":2.5,"rssi":-25.0},
+    {"hex":"ab1234","type":"adsb_icao","alt_baro":12000,"mlat":[],"tisb":[],"messages":40,"seen":3.2,"rssi":-28.1},
+    {"hex":"c0ffee","type":"adsb_icao","flight":"TST55   ","alt_baro":9000,"alt_geom":9200,"gs":250.0,"track":10.0,"lat":39.7,"lon":-104.6,"seen_pos":45.0,"mlat":[],"tisb":[],"messages":300,"seen":40.0,"rssi":-22.0}
+  ]
+}
