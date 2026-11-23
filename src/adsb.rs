@@ -1,9 +1,10 @@
 //! The aircraft list from dump1090-fa, readsb or tar1090 (`aircraft.json`, documented in
-//! dump1090's README-json.md): `now` in unix seconds, and for each aircraft `hex`,
-//! `flight`, `lat`/`lon`, `alt_geom` or `alt_baro` (feet, or "ground"), `gs` (knots),
-//! `track` (degrees true), `geom_rate` or `baro_rate` (feet/min) and `seen_pos` (seconds
-//! before `now`). Any field can be missing; aircraft without a usable position and
-//! velocity are left out.
+//! dump1090-fa's README-json.md and written by generateAircraftJson in its net_io.c;
+//! readsb's json_out.c writes the same fields): `now` in unix seconds, and for each
+//! aircraft `hex`, `flight`, `lat`/`lon`, `alt_geom` or `alt_baro` (feet, or "ground"),
+//! `gs` (knots), `track` (degrees true), `geom_rate` or `baro_rate` (feet/min) and
+//! `seen_pos` (seconds before `now`). Any field can be missing; aircraft without a usable
+//! position and velocity are left out.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -124,6 +125,24 @@ mod tests {
         let sink = 640.0 * FT / 60.0;
         let level = 140.0 * crate::geo::KT;
         assert!((norm(b.vel) - (sink * sink + level * level).sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reads_a_readsb_list() {
+        // readsb puts "type" on every aircraft, gives times to the millisecond, and moves a
+        // position too old to use into "lastPosition"
+        let body = r#"{ "now" : 1795000000.123,
+  "messages" : 5120,
+  "aircraft" : [
+{"hex":"a1b2c3","type":"adsb_icao","flight":"TST101  ","alt_baro":34000,"alt_geom":34575,"gs":451.3,"track":88.40,"geom_rate":-32,"lat":39.612345,"lon":-104.702211,"nic":8,"rc":186,"seen_pos":0.123,"mlat":[],"tisb":[],"messages":1520,"seen":0.1,"rssi":-14.2},
+{"hex":"a0beef","type":"adsb_icao","alt_baro":21000,"gs":300.0,"track":45.00,"lastPosition":{"lat":39.500000,"lon":-104.800000,"nic":8,"rc":186,"seen_pos":75.000},"mlat":[],"tisb":[],"messages":90,"seen":2.0,"rssi":-24.0}
+  ]
+}"#;
+        let l = parse(body, 10.0).unwrap();
+        assert_eq!(l.now, 1_795_000_000_123);
+        let hexes: Vec<&str> = l.tracks.iter().map(|a| a.hex.as_str()).collect();
+        assert_eq!(hexes, ["a1b2c3"]);
+        assert_eq!(l.tracks[0].ts, 1_795_000_000_000);
     }
 
     #[test]

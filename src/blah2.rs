@@ -1,13 +1,17 @@
 //! blah2's web API (github.com/30hours/blah2, api/server.js), which serves the latest
-//! CPI's results:
+//! CPI's results. blah2 itself does the cross-ambiguity function and CFAR detection
+//! (src/process/ambiguity, src/process/detection); this app only reads what they find:
 //!
 //!   GET /api/detection  {"timestamp": unix ms, "delay": [km], "doppler": [Hz], "snr": [dB]}
 //!   GET /api/config     the config.yml blah2 was started with, as JSON
 //!   GET /api/timing     {"timestamp", "nCpi", "uptime_s", "uptime_days", <stage>: ms, "cpi": ms}
 //!
-//! "delay" is the bistatic range (|Tx-P| + |P-Rx| - |Tx-Rx|), already turned from delay
-//! bins into km by Detection::delay_bin_to_km. Before the first CPI the detection
-//! endpoint returns an empty body.
+//! The shapes come from blah2's source (checked at commit c821bee, February 2026):
+//! Detection::to_json and delay_bin_to_km in src/data/Detection.cpp, Timing::to_json in
+//! src/data/meta/Timing.cpp, and src/blah2.cpp, which stamps each CPI with the time its
+//! processing started and times each stage separately. "delay" is the bistatic range
+//! (|Tx-P| + |P-Rx| - |Tx-Rx|), already turned from delay bins into km; every number has
+//! at most two decimals. Before the first CPI the endpoints return an empty body.
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -17,6 +21,13 @@ use crate::geo::{C, Pair, ecef};
 
 /// More than this in one CPI means the CFAR threshold is far too low; keep the strongest.
 pub const MAX_PER_CPI: usize = 500;
+
+/// server.js appends each message from blah2 to a variable that starts out undefined, so
+/// the first one after it starts is served as "undefined{...}".
+fn json_part(body: &str) -> &str {
+    let b = body.trim();
+    b.strip_prefix("undefined").unwrap_or(b)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Det {
@@ -44,7 +55,7 @@ pub fn parse_detection(body: &str) -> Result<Option<Frame>> {
     if body.trim().is_empty() {
         return Ok(None);
     }
-    let r: RawDetection = serde_json::from_str(body).context("blah2 detection JSON")?;
+    let r: RawDetection = serde_json::from_str(json_part(body)).context("blah2 detection JSON")?;
     if r.delay.len() != r.doppler.len() || r.delay.len() != r.snr.len() {
         bail!(
             "blah2 detection arrays differ in length: {} delay, {} doppler, {} snr",
@@ -263,7 +274,7 @@ pub struct Timing {
 }
 
 pub fn parse_timing(body: &str) -> Result<Timing> {
-    let v: Value = serde_json::from_str(body).context("blah2 timing JSON")?;
+    let v: Value = serde_json::from_str(json_part(body)).context("blah2 timing JSON")?;
     let num = |k: &str| {
         v.get(k)
             .and_then(Value::as_f64)
@@ -358,9 +369,36 @@ mod tests {
 
     #[test]
     fn reads_timing() {
-        let t = parse_timing(include_str!("../fixtures/blah2-timing.json")).unwrap();
+        let body = include_str!("../fixtures/blah2-timing.json");
+        let t = parse_timing(body).unwrap();
         assert_eq!(t.n_cpi, 48_211);
         assert_eq!(t.cpi_ms, 412.37);
         assert!(parse_timing("{}").is_err());
+        // blah2 times each stage on its own, so the stages add up to about the whole CPI
+        let v: Value = serde_json::from_str(body).unwrap();
+        let stages: f64 = v
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| {
+                !["timestamp", "nCpi", "uptime_s", "uptime_days", "cpi"].contains(&k.as_str())
+            })
+            .map(|(_, x)| x.as_f64().unwrap())
+            .sum();
+        assert!((stages - t.cpi_ms).abs() < 1.0, "{stages} vs {}", t.cpi_ms);
+    }
+
+    #[test]
+    fn the_first_message_after_blah2s_api_starts() {
+        let det = include_str!("../fixtures/blah2-detection.json");
+        assert_eq!(
+            parse_detection(&format!("undefined{det}")).unwrap(),
+            parse_detection(det).unwrap()
+        );
+        let timing = include_str!("../fixtures/blah2-timing.json");
+        assert_eq!(
+            parse_timing(&format!("undefined{timing}")).unwrap(),
+            parse_timing(timing).unwrap()
+        );
     }
 }
