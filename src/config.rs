@@ -105,6 +105,10 @@ pub struct MeshCfg {
     pub enabled: bool,
     #[serde(default = "d_batch_s")]
     pub batch_s: u64,
+    /// what the reports may average, signed events included; past it, or past
+    /// max_per_batch, the weakest detections are left out
+    #[serde(default = "d_one")]
+    pub max_kbps: u64,
     #[serde(default = "d_max_per_batch")]
     pub max_per_batch: usize,
 }
@@ -240,7 +244,8 @@ pub struct FusionCfg {
     /// a fix this close to an ADS-B aircraft is that aircraft
     #[serde(default = "d_truth_km")]
     pub truth_km: f64,
-    /// draw fixes that match no ADS-B aircraft on the map; they are counted either way
+    /// draw track ellipses and fixes no ADS-B aircraft explains on the map; they are
+    /// counted either way
     #[serde(default)]
     pub show_unmatched: bool,
 }
@@ -341,6 +346,7 @@ impl Default for MeshCfg {
         Self {
             enabled: true,
             batch_s: d_batch_s(),
+            max_kbps: d_one(),
             max_per_batch: d_max_per_batch(),
         }
     }
@@ -386,10 +392,15 @@ impl Config {
         if s.min_opportunities < 1 || s.detected_hits < 1 {
             bail!("stats.min_opportunities and stats.detected_hits must be at least 1");
         }
-        if !(10..=3600).contains(&self.mesh.batch_s)
-            || !(1..=5000).contains(&self.mesh.max_per_batch)
+        let m = &self.mesh;
+        if !(10..=3600).contains(&m.batch_s)
+            || !(1..=8).contains(&m.max_kbps)
+            || !(1..=5000).contains(&m.max_per_batch)
         {
-            bail!("mesh.batch_s must be 10 to 3600 and mesh.max_per_batch 1 to 5000");
+            bail!(
+                "mesh.batch_s must be 10 to 3600, mesh.max_kbps 1 to 8 and mesh.max_per_batch \
+                 1 to 5000"
+            );
         }
         let t = &self.tracker;
         if !(1..=t.confirm_n).contains(&t.confirm_m) || !(1..=16).contains(&t.confirm_n) {
@@ -491,9 +502,12 @@ detected_hits = 3
 show_aircraft_ids = true
 
 [mesh]
-# detection reports (range, Doppler, SNR, time) as telemetry through the core
+# detection reports (range, Doppler, SNR, time) as telemetry through the core. They
+# average at most max_kbps, signed events included (1 is the spec's "kilobits"); past
+# that, or past max_per_batch in one report, the weakest detections are left out
 enabled = true
 batch_s = 60
+max_kbps = 1
 max_per_batch = 1000
 
 [tracker]
@@ -517,8 +531,8 @@ alt_sigma_m = 3000
 area_km = 100
 max_error_km = 5
 truth_km = 3
-# fixes that match no ADS-B aircraft locate aircraft public ADS-B doesn't show; they are
-# counted, but only drawn on the map if this is true
+# track ellipses and fixes no ADS-B aircraft explains may follow aircraft public ADS-B
+# doesn't show; they are counted, but only drawn on the map if this is true
 show_unmatched = false
 "#;
 
@@ -543,6 +557,8 @@ mod tests {
         let c: Config = toml::from_str("[fusion]\nsettle_s = 30").unwrap();
         assert!(c.validate().is_err(), "settle_s under batch_s");
         let c: Config = toml::from_str("[tracker]\nconfirm_m = 6").unwrap();
+        assert!(c.validate().is_err());
+        let c: Config = toml::from_str("[mesh]\nmax_kbps = 9").unwrap();
         assert!(c.validate().is_err());
     }
 }

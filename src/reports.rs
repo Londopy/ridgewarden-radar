@@ -1,8 +1,18 @@
 //! Detection reports over the mesh. Detections are batched into `radar.detections`
 //! telemetry events: bistatic range, Doppler, SNR and time only, never samples or audio
-//! (Part 97.113(c)). A minute of a busy CPI stream is a few kilobytes. Each site also logs
-//! its geometry as a `radar.site` event whenever blah2's setup changes, so any site can
-//! locate aircraft from everyone's reports.
+//! (Part 97.113(c)). Each site also logs its geometry as a `radar.site` event whenever
+//! blah2's setup changes, so any site can locate aircraft from everyone's reports.
+//!
+//! The spec allows the reports kilobits: each site's average at most `mesh.max_kbps`
+//! (1 by default), the core's signed envelope included. Past that the weakest detections
+//! are left out. To fit more in, a report is columns of integers:
+//!
+//!   {"v": 2, "fc_hz", "t0": the first CPI's time (unix ms),
+//!    "c": [ms since the CPI before, 0 for the first], "n": [detections in each CPI],
+//!    "r": [bistatic range, 10 m], "f": [Doppler, 0.1 Hz], "s": [SNR, dB],
+//!    "dropped": detections left out}
+//!
+//! with `r`, `f` and `s` in CPI order, the first `n[0]` of them in the first CPI.
 //!
 //! The `Reports` projection notes every station's batches as they come back through the
 //! feed, and keeps the last two hours of their CPIs and detections for the tracker.
@@ -18,6 +28,11 @@ use crate::blah2::{Det, Frame, MAX_PER_CPI, Setup, Site, Window};
 
 pub const KIND: &str = "radar.detections";
 pub const SITE_KIND: &str = "radar.site";
+/// What the core wraps around a payload (keys, signature, chain, clocks): about 530 bytes
+/// typical, under 600. The budget test checks a worst case fits.
+const ENVELOPE_BYTES: usize = 600;
+/// The core refuses bigger payloads.
+const CORE_MAX_PAYLOAD: usize = 128 * 1024;
 /// more than this in one report from someone else is not a report we believe
 const MAX_IN_REPORT: usize = 5000;
 const MAX_CPIS: usize = 40_000;
@@ -25,62 +40,111 @@ const MAX_SPAN_MS: i64 = 2 * 3_600_000;
 /// how much of everyone's detections is kept for tracking
 pub const KEEP_MESH_MS: i64 = 2 * 3_600_000;
 
-fn round(x: f64, places: i32) -> f64 {
-    let k = 10f64.powi(places);
-    (x * k).round() / k
+/// The largest payload a report every `batch_s` seconds may have, to average `kbps`.
+pub fn budget(batch_s: u64, kbps: u64) -> usize {
+    (bytes_allowed(batch_s, kbps) - ENVELOPE_BYTES).min(CORE_MAX_PAYLOAD)
+}
+
+/// What a report every `batch_s` seconds may take on the mesh, envelope and all.
+pub fn bytes_allowed(batch_s: u64, kbps: u64) -> usize {
+    (kbps * 1000 / 8 * batch_s) as usize
+}
+
+/// How many detections a report carries, and how many it left out.
+pub fn kept_and_left_out(p: &Value) -> (usize, usize) {
+    let kept = p["r"].as_array().map_or(0, Vec::len);
+    let left = p["dropped"].as_u64().unwrap_or(0) as usize;
+    (kept, left)
+}
+
+/// The largest k in lo..=hi for which `ok` holds, given that it holds for lo and, once
+/// it fails, fails for every larger k.
+fn largest(lo: usize, hi: usize, ok: impl Fn(usize) -> bool) -> usize {
+    let (mut lo, mut hi) = (lo, hi);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if ok(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
 }
 
 /// Detections waiting to go out in the next report.
 #[derive(Default)]
 pub struct Batch {
-    t0: Option<i64>,
     cpis: Vec<i64>,
-    dets: Vec<(i64, Det)>,
+    /// each with the index of its CPI
+    dets: Vec<(usize, Det)>,
 }
 
 impl Batch {
     pub fn push(&mut self, f: &Frame) {
-        self.t0.get_or_insert(f.ts);
+        // reports give each CPI as a step from the one before, and a step back would make
+        // the whole report unreadable
+        if self.cpis.last().is_some_and(|t| f.ts <= *t) {
+            return;
+        }
+        let i = self.cpis.len();
         self.cpis.push(f.ts);
-        self.dets.extend(f.dets.iter().map(|d| (f.ts, *d)));
+        self.dets.extend(f.dets.iter().map(|d| (i, *d)));
     }
 
-    /// The report payload, emptying the batch; None if no CPI came in. Past `max`
-    /// detections the weakest are dropped, and the payload says how many.
-    pub fn take(&mut self, fc_hz: f64, max: usize) -> Option<Value> {
-        let t0 = self.t0?;
-        let mut dets = std::mem::take(&mut self.dets);
-        let dropped = dets.len().saturating_sub(max);
-        if dropped > 0 {
-            dets.sort_by(|a, b| b.1.snr_db.total_cmp(&a.1.snr_db));
-            dets.truncate(max);
-            dets.sort_by_key(|d| d.0);
+    /// The report payload, emptying the batch; None if no CPI came in. It carries every
+    /// CPI and the strongest detections, at most `max`, that fit in `max_bytes`. If not
+    /// even the CPI times fit, only the newest CPIs go.
+    pub fn take(&mut self, fc_hz: f64, max: usize, max_bytes: usize) -> Option<Value> {
+        let b = std::mem::take(self);
+        if b.cpis.is_empty() {
+            return None;
         }
-        let d: Vec<Value> = dets
+        let fits = |v: &Value| v.to_string().len() <= max_bytes;
+        let mut strongest: Vec<usize> = (0..b.dets.len()).collect();
+        strongest.sort_by(|&x, &y| b.dets[y].1.snr_db.total_cmp(&b.dets[x].1.snr_db));
+        let with = |k: usize| {
+            let mut keep = strongest[..k].to_vec();
+            keep.sort_unstable();
+            b.encode(fc_hz, 0, &keep)
+        };
+        if fits(&with(0)) {
+            let k = largest(0, max.min(b.dets.len()), |k| fits(&with(k)));
+            return Some(with(k));
+        }
+        let n = b.cpis.len();
+        let m = largest(1, n, |m| fits(&b.encode(fc_hz, n - m, &[])));
+        Some(b.encode(fc_hz, n - m, &[]))
+    }
+
+    /// The payload for the CPIs from `from` on and the detections `keep` (indices into
+    /// `dets`, in order, all in those CPIs).
+    fn encode(&self, fc_hz: f64, from: usize, keep: &[usize]) -> Value {
+        let cpis = &self.cpis[from..];
+        let c: Vec<i64> = cpis
             .iter()
-            .map(|(ts, d)| {
-                json!([
-                    ts - t0,
-                    round(d.range_km, 2),
-                    round(d.doppler_hz, 1),
-                    round(d.snr_db, 1)
-                ])
-            })
+            .scan(cpis[0], |prev, &t| Some(t - std::mem::replace(prev, t)))
             .collect();
-        let c: Vec<i64> = self.cpis.iter().map(|t| t - t0).collect();
-        let v = json!({
-            "v": 1,
+        let mut n = vec![0u32; cpis.len()];
+        let (mut r, mut f, mut s) = (vec![], vec![], vec![]);
+        for &j in keep {
+            let (i, d) = self.dets[j];
+            n[i - from] += 1;
+            r.push((d.range_km * 100.0).round() as i64);
+            f.push((d.doppler_hz * 10.0).round() as i64);
+            s.push(d.snr_db.round() as i64);
+        }
+        json!({
+            "v": 2,
             "fc_hz": fc_hz,
-            "t0": t0,
-            "span_ms": c.last().copied().unwrap_or(0),
-            "cpis": c.len(),
+            "t0": cpis[0],
             "c": c,
-            "fields": ["dt_ms", "range_km", "doppler_hz", "snr_db"],
-            "d": d,
-            "dropped": dropped,
-        });
-        *self = Self::default();
-        Some(v)
+            "n": n,
+            "r": r,
+            "f": f,
+            "s": s,
+            "dropped": self.dets.len() - keep.len(),
+        })
     }
 }
 
@@ -138,38 +202,60 @@ fn parse_site_payload(p: &Value) -> Option<Setup> {
 
 type Parsed = (Vec<i64>, Vec<(i64, Det)>);
 
-/// A report's CPI times and detections, if it is well formed.
+/// A report's CPI times and detections, if it is well formed. Reports from 0.1.0 (rows
+/// instead of columns, `"v": 1`) are not read.
 fn parse_report(p: &Value) -> Option<Parsed> {
+    if p.get("v")?.as_i64()? != 2 {
+        return None;
+    }
     // a report from the future is a broken clock, and would never be pruned
     let t0 = p
         .get("t0")?
         .as_i64()
         .filter(|t| (0..=now_ms() + 60_000).contains(t))?;
-    let offset = |x: &Value| x.as_i64().filter(|d| (0..=MAX_SPAN_MS).contains(d));
-    let c = p.get("c")?.as_array().filter(|c| c.len() <= MAX_CPIS)?;
-    let cpis: Vec<i64> = c
-        .iter()
-        .map(|x| offset(x).map(|d| t0 + d))
-        .collect::<Option<_>>()?;
-    let d = p
-        .get("d")?
-        .as_array()
-        .filter(|d| d.len() <= MAX_IN_REPORT)?;
-    let dets = d
-        .iter()
-        .map(|row| {
-            let r = row.as_array().filter(|r| r.len() == 4)?;
-            let f = |i: usize, lim: f64| r[i].as_f64().filter(|x| x.is_finite() && x.abs() <= lim);
-            Some((
-                t0 + offset(&r[0])?,
-                Det {
-                    range_km: f(1, 1000.0)?,
-                    doppler_hz: f(2, 10_000.0)?,
-                    snr_db: f(3, 1000.0)?,
-                },
-            ))
-        })
-        .collect::<Option<_>>()?;
+    let ints = |k: &str, max_len: usize, lim: i64| -> Option<Vec<i64>> {
+        p.get(k)?
+            .as_array()
+            .filter(|a| a.len() <= max_len)?
+            .iter()
+            .map(|x| x.as_i64().filter(|x| (-lim..=lim).contains(x)))
+            .collect()
+    };
+    let c = ints("c", MAX_CPIS, MAX_SPAN_MS)?;
+    let n = ints("n", MAX_CPIS, MAX_IN_REPORT as i64)?;
+    let r = ints("r", MAX_IN_REPORT, 100_000)?;
+    let f = ints("f", MAX_IN_REPORT, 100_000)?;
+    let s = ints("s", MAX_IN_REPORT, 1000)?;
+    let ok = n.len() == c.len()
+        && f.len() == r.len()
+        && s.len() == r.len()
+        && n.iter().all(|k| *k >= 0)
+        && n.iter().sum::<i64>() == r.len() as i64;
+    if !ok {
+        return None;
+    }
+    let mut cpis = Vec::with_capacity(c.len());
+    let mut t = t0;
+    for d in c {
+        t += d;
+        if d < 0 || t - t0 > MAX_SPAN_MS {
+            return None;
+        }
+        cpis.push(t);
+    }
+    let mut dets = Vec::with_capacity(r.len());
+    let mut j = 0;
+    for (ts, k) in cpis.iter().zip(&n) {
+        for _ in 0..*k {
+            let det = Det {
+                range_km: r[j] as f64 / 100.0,
+                doppler_hz: f[j] as f64 / 10.0,
+                snr_db: s[j] as f64,
+            };
+            dets.push((*ts, det));
+            j += 1;
+        }
+    }
     Some((cpis, dets))
 }
 
@@ -250,9 +336,8 @@ impl Projection for Reports {
         if e.kind != KIND {
             return Ok(());
         }
-        let Some((cpis, dets)) = parse_report(&e.payload) else {
-            return Ok(());
-        };
+        // one this version can't read, such as 0.1.0's, still counts, with nothing in it
+        let (cpis, dets) = parse_report(&e.payload).unwrap_or_default();
         let added = tx.execute(
             "INSERT OR IGNORE INTO reports (event_id, ts, author_key, call, cpis, dets, bytes)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -263,7 +348,8 @@ impl Projection for Reports {
                 call,
                 cpis.len() as i64,
                 dets.len() as i64,
-                e.payload.to_string().len() as i64
+                // the whole signed event, as it crosses the mesh
+                serde_json::to_string(e)?.len() as i64
             ],
         )?;
         // replaying a long feed history: only recent reports are worth tracking
@@ -394,11 +480,13 @@ pub struct Station {
     pub dets: i64,
     pub bytes: i64,
     pub last: i64,
+    /// reports this version couldn't read, counted with no CPIs
+    pub unreadable: i64,
 }
 
 pub fn stations(conn: &Connection, from: i64) -> Result<Vec<Station>> {
     let mut st = conn.prepare(
-        "SELECT max(call), count(*), sum(cpis), sum(dets), sum(bytes), max(ts)
+        "SELECT max(call), count(*), sum(cpis), sum(dets), sum(bytes), max(ts), sum(cpis = 0)
          FROM reports WHERE ts >= ?1 GROUP BY author_key ORDER BY max(call)",
     )?;
     let rows = st.query_map([from], |r| {
@@ -409,6 +497,7 @@ pub fn stations(conn: &Connection, from: i64) -> Result<Vec<Station>> {
             dets: r.get(3)?,
             bytes: r.get(4)?,
             last: r.get(5)?,
+            unreadable: r.get(6)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -442,67 +531,206 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_minute_of_detections_is_kilobytes() {
-        let mut b = Batch::default();
-        assert!(b.take(96.9e6, 1000).is_none(), "nothing to send");
-        // 80 CPIs of 0.75 s with 6 detections each: a busy minute
-        for i in 0..80 {
-            b.push(&frame(1_000_000 + i * 750, 6));
-        }
-        let p = b.take(96.9e6, 1000).unwrap();
-        assert_eq!(p["cpis"], 80);
-        assert_eq!(p["span_ms"], 79 * 750);
-        assert_eq!(p["c"][2], 1500);
-        assert_eq!(p["d"].as_array().unwrap().len(), 480);
-        assert_eq!(p["d"][7], json!([750, 10.12, -40.8, 13.0]));
-        let bytes = p.to_string().len();
-        assert!(bytes < 17_000, "{bytes} bytes");
-        assert!(b.take(96.9e6, 1000).is_none(), "the batch was emptied");
+    /// Size on the wire of a telemetry event carrying `payload`, with the biggest envelope
+    /// the core can give it: a 20-character callsign and 2^53 for its counters.
+    fn signed_size(payload: Value) -> usize {
+        let e = Event {
+            id: "0".repeat(64),
+            author: ridgewarden_client::event::Author {
+                call: "N0TEST/ABCDEFGH-1234".into(),
+                key: "0".repeat(64),
+            },
+            seq: 1 << 53,
+            prev: Some("0".repeat(64)),
+            lamport: 1 << 53,
+            wall_time: "2026-11-20T08:17:18.291Z".into(),
+            mono_time: 1 << 53,
+            kind: KIND.into(),
+            payload,
+            sig: "0".repeat(128),
+            log: Some("telemetry".into()),
+        };
+        serde_json::to_string(&e).unwrap().len()
     }
 
     #[test]
-    fn over_the_cap_the_weakest_go() {
+    fn reports_round_trip_in_columns() {
+        let mut b = Batch::default();
+        assert!(b.take(96.9e6, 1000, 7000).is_none(), "nothing to send");
+        let t0 = 1_795_000_000_250;
+        b.push(&frame(t0, 3));
+        b.push(&frame(t0 + 751, 0));
+        // a CPI that isn't after the one before is left out
+        b.push(&frame(t0 + 500, 2));
+        b.push(&frame(t0 + 751, 2));
+        b.push(&frame(t0 + 1500, 1));
+        let p = b.take(96.9e6, 1000, 7000).unwrap();
+        assert!(
+            b.take(96.9e6, 1000, 7000).is_none(),
+            "the batch was emptied"
+        );
+        assert_eq!(p["t0"], t0);
+        assert_eq!(p["c"], json!([0, 751, 749]));
+        assert_eq!(p["n"], json!([3, 0, 1]));
+        // 10.12346 km and -40.77 Hz are 1012 tens of metres and -408 tenths of a hertz
+        assert_eq!(p["r"], json!([1000, 1012, 1025, 1000]));
+        assert_eq!(p["f"], json!([-400, -408, -415, -400]));
+        assert_eq!(p["s"], json!([12, 13, 14, 12]));
+        assert_eq!(p["dropped"], 0);
+        let (cpis, dets) = parse_report(&p).unwrap();
+        assert_eq!(cpis, [t0, t0 + 751, t0 + 1500]);
+        let times: Vec<i64> = dets.iter().map(|d| d.0).collect();
+        assert_eq!(times, [t0, t0, t0, t0 + 1500]);
+        assert_eq!(
+            dets[1].1,
+            Det {
+                range_km: 10.12,
+                doppler_hz: -40.8,
+                snr_db: 13.0
+            }
+        );
+    }
+
+    /// Detections as wide as blah2 can make them: far out, fast and strong.
+    fn wide(ts: i64, n: usize) -> Frame {
+        Frame {
+            ts,
+            dets: (0..n)
+                .map(|i| Det {
+                    range_km: 299.99 - i as f64 * 0.37,
+                    doppler_hz: -999.99 + i as f64 * 1.3,
+                    snr_db: 10.0 + ((ts / 7 + i as i64) % 89) as f64,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn reports_stay_inside_the_mesh_budget() {
+        let t0 = 1_795_000_000_000;
+        // (batch_s, kbps, CPI ms, detections per CPI): blah2's default CPI, short and long
+        // ones, short and long batches, the most the config allows, and CPIs so short their
+        // times alone don't fit
+        for (batch_s, kbps, cpi_ms, per_cpi) in [
+            (60, 1, 750, 40),
+            (60, 1, 100, 10),
+            (10, 1, 500, 40),
+            (600, 1, 1000, 40),
+            (60, 8, 500, 200),
+            (10, 1, 20, 1),
+        ] {
+            let mut b = Batch::default();
+            let n = batch_s as i64 * 1000 / cpi_ms;
+            for k in 0..n {
+                b.push(&wide(t0 + k * cpi_ms, per_cpi));
+            }
+            let p = b.take(96.9e6, 5000, budget(batch_s, kbps)).unwrap();
+            let bytes = signed_size(p.clone());
+            let allowed = bytes_allowed(batch_s, kbps);
+            let case = format!("{batch_s} s of {cpi_ms} ms CPIs: {bytes} of {allowed} bytes");
+            assert!(bytes <= allowed, "{case}");
+            assert!(bytes > allowed * 9 / 10, "budget left unused, {case}");
+            let (cpis, dets) = parse_report(&p).unwrap();
+            assert_eq!(
+                dets.len() + p["dropped"].as_u64().unwrap() as usize,
+                n as usize * per_cpi,
+                "{case}"
+            );
+            assert_eq!(*cpis.last().unwrap(), t0 + (n - 1) * cpi_ms, "{case}");
+            if cpi_ms >= 100 {
+                assert_eq!(cpis.len(), n as usize, "every CPI goes, {case}");
+                // and the strongest detections with them
+                let mut snr: Vec<f64> = (0..n)
+                    .flat_map(|k| wide(t0 + k * cpi_ms, per_cpi).dets)
+                    .map(|d| d.snr_db)
+                    .collect();
+                snr.sort_by(|a, b| b.total_cmp(a));
+                let weakest_sent = dets.iter().map(|d| d.1.snr_db).fold(f64::MAX, f64::min);
+                assert!(
+                    !dets.is_empty() && weakest_sent >= snr[dets.len()],
+                    "{case}"
+                );
+            } else {
+                assert!(dets.is_empty() && cpis.len() < n as usize, "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn over_the_budget_the_weakest_go() {
         let mut b = Batch::default();
         b.push(&frame(0, 30));
-        let p = b.take(96.9e6, 10).unwrap();
+        let p = b.take(96.9e6, 10, 7000).unwrap();
         assert_eq!(p["dropped"], 20);
-        let snr: Vec<f64> = p["d"]
+        assert_eq!(kept_and_left_out(&p), (10, 20));
+        let snr: Vec<i64> = p["s"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|r| r[3].as_f64().unwrap())
+            .map(|s| s.as_i64().unwrap())
             .collect();
-        assert!(snr.iter().all(|s| *s >= 22.0), "{snr:?}");
+        assert_eq!(snr.len(), 10);
+        assert!(snr.iter().all(|s| *s >= 22), "{snr:?}");
+
+        // the same by size: room for about half
+        let mut b = Batch::default();
+        b.push(&frame(0, 30));
+        let all = b.take(96.9e6, 1000, 7000).unwrap().to_string().len();
+        b.push(&frame(0, 30));
+        let p = b.take(96.9e6, 1000, all - 100).unwrap();
+        let kept = p["s"].as_array().unwrap();
+        assert!((10..30).contains(&kept.len()), "{} kept", kept.len());
+        let weakest_kept = kept.iter().map(|s| s.as_i64().unwrap()).min().unwrap();
+        assert!(weakest_kept > 12, "the weakest went first: {p}");
+        assert!(p.to_string().len() <= all - 100);
     }
 
     #[test]
-    fn reports_are_counted_and_bad_ones_ignored() {
+    fn reports_are_counted_and_bad_ones_not_tracked() {
         let mut f = Fake::new(vec![Box::new(Reports)]);
         let now = now_ms();
         let mut b = Batch::default();
         b.push(&frame(now - 2_000, 4));
         b.push(&frame(now - 1_500, 0));
-        let good = b.take(96.9e6, 1000).unwrap();
+        let good = b.take(96.9e6, 1000, 7000).unwrap();
         let key = f.add(KIND, good.clone(), now).author.key;
-        let bad = |d: Value, c: Value| json!({"t0": now, "cpis": 1, "c": c, "d": d});
-        f.add(KIND, bad(json!([[1, 2, "x", 4]]), json!([0])), now);
-        f.add(KIND, bad(json!("lots"), json!([0])), now);
-        f.add(KIND, bad(json!([[1, 2, 3, 4]]), json!([-5])), now);
-        f.add(
-            KIND,
-            bad(json!([[1, 2, 3, 4]]), json!(vec![0; MAX_CPIS + 1])),
-            now,
-        );
-        f.add(KIND, bad(json!([[1, 2, 1e9, 4]]), json!([0])), now);
-        let future = json!({"t0": i64::MAX - 10, "cpis": 1, "c": [5], "d": [[5, 2, 3, 4]]});
-        f.add(KIND, future, now);
-        f.add("other.thing", good, now);
+        // the whole signed event is counted, not just its payload
+        let s = stations(&f.conn, 0).unwrap();
+        assert!(s[0].bytes as usize > good.to_string().len() + 300);
+        let report = |c: Value, n: Value, r: Value| json!({"v": 2, "t0": now - 1000, "c": c, "n": n, "r": r, "f": [1], "s": [1]});
+        assert!(parse_report(&report(json!([0]), json!([1]), json!([1]))).is_some());
+        let bad = [
+            report(json!([0]), json!([1]), json!(["x"])),
+            report(json!([0]), json!([1]), json!("lots")),
+            report(json!([0]), json!([1]), json!([1, 2])),
+            report(json!([0]), json!([2]), json!([1])),
+            report(json!([0, 0]), json!([-1, 2]), json!([1])),
+            report(json!([0, -5]), json!([1, 0]), json!([1])),
+            report(json!(vec![0; MAX_CPIS + 1]), json!([1]), json!([1])),
+            report(json!([0, 7_000_000, 300_000]), json!([1, 0, 0]), json!([1])),
+            report(json!([0]), json!([1]), json!([1e9])),
+            report(json!([0]), json!([i64::MAX]), json!([1])),
+            report(json!([0]), json!([1]), json!([i64::MIN])),
+            json!({"v": 2, "t0": i64::MAX - 10, "c": [0], "n": [1], "r": [1], "f": [1], "s": [1]}),
+            json!({"v": 2, "t0": now - 1000, "c": [0], "n": [1], "r": [1], "f": [], "s": [1]}),
+            json!({"v": 2, "t0": now - 1000, "c": [0], "n": [1], "r": [1], "f": [1], "s": []}),
+            // what 0.1.0 sent
+            json!({"v": 1, "t0": now, "c": [0], "d": [[0, 2.5, 3.0, 4.0]]}),
+        ];
+        let n_bad = bad.len() as i64;
+        for bad in bad {
+            assert!(parse_report(&bad).is_none(), "{bad}");
+            f.add(KIND, bad, now);
+        }
+        f.add("other.thing", good.clone(), now);
         let s = stations(&f.conn, 0).unwrap();
         assert_eq!(s.len(), 1);
-        assert_eq!((s[0].reports, s[0].cpis, s[0].dets), (1, 2, 4));
         assert_eq!(s[0].call, "N0TEST");
-        assert!(s[0].bytes > 50);
+        // reports this version can't read still show, with nothing in them
+        assert_eq!(
+            (s[0].reports, s[0].cpis, s[0].dets, s[0].unreadable),
+            (1 + n_bad, 2, 4, n_bad)
+        );
         let fr = frames(&f.conn, &key, now - 10_000, now).unwrap();
         assert_eq!(fr.len(), 2, "the empty CPI is kept too");
         assert_eq!((fr[0].dets.len(), fr[1].dets.len()), (4, 0));
@@ -515,7 +743,7 @@ mod tests {
         let then = now_ms() - KEEP_MESH_MS - 60_000;
         let mut b = Batch::default();
         b.push(&frame(then, 3));
-        f.add(KIND, b.take(96.9e6, 1000).unwrap(), then);
+        f.add(KIND, b.take(96.9e6, 1000, 7000).unwrap(), then);
         assert_eq!(stations(&f.conn, 0).unwrap()[0].dets, 3);
         let n: i64 = f
             .conn

@@ -351,11 +351,13 @@ impl Sim {
         json!({"now": now as f64 / 1000.0, "messages": messages, "aircraft": list}).to_string()
     }
 
+    /// blah2's timing, with the one stage a simulator has.
     pub fn timing_json(&self, now: i64) -> String {
         let up = (now - self.start) as f64 / 1000.0;
         json!({
-            "timestamp": self.t, "nCpi": self.n_cpi, "uptime_s": up,
-            "uptime_days": up / 86_400.0, "cpi": round2(self.step_ms),
+            "timestamp": self.t, "nCpi": self.n_cpi, "uptime_s": round2(up),
+            "uptime_days": round2(up / 86_400.0), "detector": round2(self.step_ms),
+            "cpi": round2(self.step_ms),
         })
         .to_string()
     }
@@ -567,7 +569,8 @@ mod tests {
         let per_cpi = unmatched as f64 / 1200.0;
         assert!((0.3..2.5).contains(&per_cpi), "{per_cpi} unmatched per CPI");
         assert!(dets > unmatched);
-        assert!(!sim.timing_json(t0).is_empty());
+        let timing = blah2::parse_timing(&sim.timing_json(t0 + 600_000)).unwrap();
+        assert_eq!((timing.n_cpi, timing.uptime_s), (1200, 600.0));
     }
 
     /// Three simulated sites, through the per-site trackers and the position fit, end
@@ -620,12 +623,32 @@ mod tests {
             lat0: 39.5,
             lon0: -104.7,
         };
-        let (views, fixes) = hub::epoch(&sites, &frames, grid, &cfg, t_ref);
+        let (mut views, fixes) = hub::epoch(&sites, &frames, grid, &cfg, t_ref);
         assert_eq!(views.len(), 3);
         assert!(views.iter().all(|v| !v.tracks.is_empty()));
         let truth = adsb::parse(&sim.aircraft_list(t_ref, true), 10.0)
             .unwrap()
             .tracks;
+        // what a real ADS-B receiver would list, without the aircraft that have none
+        let public = adsb::parse(&sim.aircraft_json(t_ref), 10.0).unwrap().tracks;
+        let g = crate::config::MatchCfg::default();
+        let marked = |views: &mut [hub::SiteTracks], list: &[adsb::Track]| {
+            hub::explain(views, Some(list), g.range_gate_km, g.doppler_gate_hz, t_ref);
+            views
+                .iter()
+                .flat_map(|v| &v.tracks)
+                .filter(|e| e.adsb)
+                .count()
+        };
+        let n_tracks: usize = views.iter().map(|v| v.tracks.len()).sum();
+        let by_all = marked(&mut views, &truth);
+        let by_public = marked(&mut views, &public);
+        // 39 of 41 when written: most tracks are explained, but not those of the aircraft
+        // without ADS-B
+        assert!(
+            by_public * 5 >= n_tracks * 4 && by_public < by_all,
+            "{by_public} of {n_tracks} tracks explained by ADS-B, {by_all} by every aircraft"
+        );
         assert!(fixes.len() >= 5, "{} fixes", fixes.len());
         // most fixes are real aircraft with the truth inside three sigma and a kilometre
         // (the fit assumes level flight); the rest are ghosts, two sites' tracks of

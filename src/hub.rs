@@ -11,6 +11,7 @@ use crate::geo::{C, add, ecef, horizontal_km, scale};
 use crate::reports::SiteGeo;
 use crate::store::{FixRow, Truth};
 use crate::track::{Params, Tracker};
+use crate::truth::expect;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Cfg {
@@ -24,13 +25,43 @@ pub struct Cfg {
     pub budget: Duration,
 }
 
+/// A confirmed track at a moment: somewhere on its bistatic ellipse is an aircraft.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ellipse {
+    pub id: u32,
+    pub range_km: f64,
+    pub doppler_hz: f64,
+    /// an ADS-B aircraft is on it (see `explain`)
+    pub adsb: bool,
+}
+
 /// One site's confirmed tracks at a moment, for the map.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SiteTracks {
     pub call: String,
     pub setup: Setup,
-    /// track id, bistatic range km, Doppler Hz
-    pub tracks: Vec<(u32, f64, f64)>,
+    pub tracks: Vec<Ellipse>,
+}
+
+/// Mark the tracks an ADS-B aircraft explains: one whose bistatic range and Doppler at
+/// `t`, for that track's site, are within the match gates of the track's.
+pub fn explain(
+    views: &mut [SiteTracks],
+    truth: Option<&[Aircraft]>,
+    range_km: f64,
+    doppler_hz: f64,
+    t: i64,
+) {
+    let aircraft = truth.unwrap_or_default();
+    for v in views {
+        let pair = v.setup.pair();
+        let expected: Vec<(f64, f64)> = aircraft.iter().map(|a| expect(&pair, a, t)).collect();
+        for e in &mut v.tracks {
+            e.adsb = expected.iter().any(|(r, f)| {
+                (r - e.range_km).abs() <= range_km && (f - e.doppler_hz).abs() <= doppler_hz
+            });
+        }
+    }
 }
 
 /// One moment worked out from every site's reports: what each site was tracking, the
@@ -103,7 +134,12 @@ pub fn epoch(
                 .live()
                 .iter()
                 .filter(|t| t.confirmed && recent(t))
-                .map(|t| (t.id, t.range_km(), t.doppler_hz(lambda)))
+                .map(|t| Ellipse {
+                    id: t.id,
+                    range_km: t.range_km(),
+                    doppler_hz: t.doppler_hz(lambda),
+                    adsb: false,
+                })
                 .collect(),
         });
         let mut mine = vec![];
@@ -256,6 +292,51 @@ mod tests {
             carry(prev, vec![], 70_000).is_empty(),
             "given up after a minute"
         );
+    }
+
+    #[test]
+    fn tracks_are_explained_only_by_an_aircraft_on_them() {
+        let near =
+            crate::blah2::parse_config(include_str!("../fixtures/blah2-config.json")).unwrap();
+        let mut far = near.clone();
+        far.rx.latitude -= 0.3;
+        // flying east at 250 m/s, reported 4 s before the moment
+        let (lat, lon) = (-34.85, 138.75);
+        let a = Aircraft {
+            hex: "7c0001".into(),
+            flight: String::new(),
+            ts: 6_000,
+            lat,
+            lon,
+            pos: ecef(lat, lon, 8000.0),
+            vel: crate::geo::enu_to_ecef(lat, lon, [250.0, 0.0, 0.0]),
+        };
+        let (r, f) = expect(&near.pair(), &a, 10_000);
+        let ellipse = |id, range_km, doppler_hz| Ellipse {
+            id,
+            range_km,
+            doppler_hz,
+            adsb: false,
+        };
+        let site = |setup: &Setup| SiteTracks {
+            call: "N0SIM".into(),
+            setup: setup.clone(),
+            tracks: vec![
+                ellipse(1, r + 0.5, f - 3.0),
+                ellipse(2, r + 4.0, f),
+                ellipse(3, r, f + 20.0),
+            ],
+        };
+        let mut views = vec![site(&near), site(&far)];
+        explain(&mut views, Some(std::slice::from_ref(&a)), 2.0, 8.0, 10_000);
+        let marks: Vec<Vec<bool>> = views
+            .iter()
+            .map(|v| v.tracks.iter().map(|e| e.adsb).collect())
+            .collect();
+        // the other site sees the same aircraft somewhere else in range and Doppler
+        assert_eq!(marks, [[true, false, false], [false, false, false]]);
+        explain(&mut views, None, 2.0, 8.0, 10_000);
+        assert!(views.iter().flat_map(|v| &v.tracks).all(|e| !e.adsb));
     }
 
     #[test]

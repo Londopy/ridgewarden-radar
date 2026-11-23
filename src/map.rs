@@ -1,17 +1,19 @@
 //! The map: each site's transmitter and receiver, the bistatic ellipse of every track it
 //! is following (somewhere on that ellipse is an aircraft), the aircraft located from two
 //! or more sites with their error ellipses, and the ADS-B aircraft at the same moment.
+//! Tracks and fixes no ADS-B aircraft explains are left off unless asked for.
 //! Ellipses are drawn on the ground; an aircraft's height puts it inside its own, by a
 //! kilometre or more for one at cruising height near the sites.
 
 use std::fmt::Write as _;
 
 use ridgewarden_client::util::esc;
+use serde_json::{Value, json};
 
 use crate::adsb::Track as Aircraft;
 use crate::fuse::Plane;
 use crate::geo::{dot, enu_to_ecef, scale};
-use crate::hub::View;
+use crate::hub::{Ellipse, View};
 use crate::store::{FixRow, Truth};
 
 const W: f64 = 600.0;
@@ -79,6 +81,86 @@ pub fn shown(show_unmatched: bool, r: &FixRow) -> bool {
     show_unmatched || matches!(r.truth, Truth::Aircraft { .. })
 }
 
+/// The same for tracks: two sites' ellipses cross where the hidden fix would be.
+pub fn drawn(show_unmatched: bool, e: &Ellipse) -> bool {
+    show_unmatched || e.adsb
+}
+
+/// The line under the map saying what it left out and why, if anything.
+pub fn left_off(v: &View, show_unmatched: bool) -> Option<String> {
+    let fixes = v.fixes.iter().filter(|r| !shown(show_unmatched, r)).count();
+    let tracks = v
+        .sites
+        .iter()
+        .flat_map(|s| &s.tracks)
+        .filter(|e| !drawn(show_unmatched, e))
+        .count();
+    let parts: Vec<String> = [
+        (fixes, "fix", "fixes"),
+        (tracks, "track ellipse", "track ellipses"),
+    ]
+    .into_iter()
+    .filter(|&(k, ..)| k > 0)
+    .map(|(k, one, many)| format!("{k} {}", if k == 1 { one } else { many }))
+    .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let why = if v.truth.is_none() {
+        "there was no current ADS-B to check them against"
+    } else {
+        "no ADS-B aircraft is on them"
+    };
+    Some(format!(
+        "Left off the map, since {why}: {}. They may track aircraft public ADS-B doesn't show \
+         (set fusion.show_unmatched to draw them).",
+        parts.join(" and ")
+    ))
+}
+
+/// The map's moment as JSON, leaving out what the map leaves out, with ADS-B aircraft
+/// ids only if `ids`.
+pub fn api(v: &View, ids: bool, show_unmatched: bool) -> Value {
+    let fixes: Vec<Value> = v
+        .fixes
+        .iter()
+        .filter(|r| shown(show_unmatched, r))
+        .map(|r| {
+            let f = &r.fix;
+            let adsb = match &r.truth {
+                Truth::Unknown => json!(null),
+                Truth::Nothing => json!({"near": false}),
+                Truth::Aircraft {
+                    hex,
+                    flight,
+                    err_km,
+                } if ids => json!({"near": true, "hex": hex, "flight": flight, "err_km": err_km}),
+                Truth::Aircraft { err_km, .. } => json!({"near": true, "err_km": err_km}),
+            };
+            json!({"track": r.track, "sites": r.sites, "lat": f.lat, "lon": f.lon, "alt_m": f.alt_m,
+                "alt_sigma_m": f.alt_sigma_m, "ve": f.ve, "vn": f.vn, "major_km": f.major_km,
+                "minor_km": f.minor_km, "angle_deg": f.angle_deg, "chi2": f.chi2, "adsb": adsb})
+        })
+        .collect();
+    let sites: Vec<Value> = v
+        .sites
+        .iter()
+        .map(|s| {
+            let tracks: Vec<Value> = s
+                .tracks
+                .iter()
+                .filter(|e| drawn(show_unmatched, e))
+                .map(|e| {
+                    json!({"id": e.id, "range_km": e.range_km, "doppler_hz": e.doppler_hz,
+                        "adsb": e.adsb})
+                })
+                .collect();
+            json!({"call": s.call, "tracks": tracks})
+        })
+        .collect();
+    json!({"experimental": true, "ts": v.ts, "sites": sites, "fixes": fixes})
+}
+
 pub fn render(v: &View, o: &Opts) -> String {
     let f = Frame {
         k: (W / 2.0 - 10.0) / o.half_km,
@@ -98,13 +180,16 @@ pub fn render(v: &View, o: &Opts) -> String {
         let baseline = (tx.0 - rx.0).hypot(tx.1 - rx.1);
         let mid = ((tx.0 + rx.0) / 2.0, (tx.1 + rx.1) / 2.0);
         let angle = (rx.1 - tx.1).atan2(rx.0 - tx.0).to_degrees();
-        for &(id, range, doppler) in &site.tracks {
-            let a = (range + baseline) / 2.0;
+        for e in site.tracks.iter().filter(|e| drawn(o.show_unmatched, e)) {
+            let a = (e.range_km + baseline) / 2.0;
             let b2 = a * a - (baseline / 2.0).powi(2);
             if b2 <= 0.0 {
                 continue;
             }
-            let tip = format!("{} track {id}: {range:.1} km, {doppler:.0} Hz", site.call);
+            let tip = format!(
+                "{} track {}: {:.1} km, {:.0} Hz",
+                site.call, e.id, e.range_km, e.doppler_hz
+            );
             ellipse(
                 &mut s,
                 &f,
@@ -206,6 +291,15 @@ mod tests {
     use crate::fuse::Fix;
     use crate::hub::SiteTracks;
 
+    fn ellipse(id: u32, range_km: f64, adsb: bool) -> Ellipse {
+        Ellipse {
+            id,
+            range_km,
+            doppler_hz: 50.0,
+            adsb,
+        }
+    }
+
     fn view(truth: Truth) -> View {
         let setup = parse_config(
             &crate::sim::Plan {
@@ -234,7 +328,11 @@ mod tests {
             sites: vec![SiteTracks {
                 call: "<N0SIM>".into(),
                 setup,
-                tracks: vec![(4, 20.0, 50.0), (5, -1.0, 10.0)],
+                tracks: vec![
+                    ellipse(4, 20.0, true),
+                    ellipse(5, -1.0, true),
+                    ellipse(6, 30.0, false),
+                ],
             }],
             fixes: vec![FixRow {
                 track: 12,
@@ -272,8 +370,10 @@ mod tests {
             err_km: 0.2,
         };
         let svg = render(&view(seen), &o);
-        // one track ellipse (the negative range can't be one), one error ellipse
+        // one track ellipse (the negative range can't be one, and no ADS-B aircraft is on
+        // track 6), one error ellipse
         assert_eq!(svg.matches("<ellipse class=\"s0\"").count(), 1);
+        assert!(svg.contains("track 4:") && !svg.contains("track 6:"));
         assert_eq!(svg.matches("<ellipse class=\"rule\"").count(), 1);
         assert!(svg.contains("#12"));
         assert!(svg.contains("&lt;N0SIM&gt;") && !svg.contains("<N0SIM>"));
@@ -284,12 +384,85 @@ mod tests {
             show_unmatched: true,
             ..o
         };
-        assert!(render(&view(Truth::Nothing), &all).contains("#12"));
+        let svg_all = render(&view(Truth::Nothing), &all);
+        assert!(svg_all.contains("#12"));
+        assert!(
+            svg_all.contains("track 6:"),
+            "asked for, tracks without ADS-B are drawn"
+        );
         let unknown = &view(Truth::Unknown).fixes[0];
         assert!(!shown(false, unknown) && shown(true, unknown));
         // served on its own as image/svg+xml, so every attribute value is quoted
         assert!(
             !svg.contains("=none") && !svg.contains("=currentColor") && !svg.contains("=chart")
+        );
+    }
+
+    fn seen() -> Truth {
+        Truth::Aircraft {
+            hex: "a00001".into(),
+            flight: "TST1".into(),
+            err_km: 0.2,
+        }
+    }
+
+    #[test]
+    fn says_what_it_left_off_and_why() {
+        // tracks 4 and 5 have an ADS-B aircraft on them and 6 hasn't; the fix has none near
+        let mut v = view(Truth::Nothing);
+        v.truth = Some(vec![]);
+        let note = left_off(&v, false).unwrap();
+        assert!(
+            note.contains("no ADS-B aircraft is on them: 1 fix and 1 track ellipse."),
+            "{note}"
+        );
+        assert_eq!(left_off(&v, true), None, "asked for, nothing is left off");
+        v.sites[0].tracks.push(ellipse(7, 25.0, false));
+        let note = left_off(&v, false).unwrap();
+        assert!(note.contains("1 fix and 2 track ellipses"), "{note}");
+        v.truth = None;
+        let note = left_off(&v, false).unwrap();
+        assert!(note.contains("no current ADS-B"), "{note}");
+        // only what was left off is listed
+        let mut fix_seen = view(seen());
+        fix_seen.truth = Some(vec![]);
+        let note = left_off(&fix_seen, false).unwrap();
+        assert!(note.contains("on them: 1 track ellipse. They"), "{note}");
+        let mut tracks_seen = view(Truth::Nothing);
+        tracks_seen.truth = Some(vec![]);
+        tracks_seen.sites[0].tracks.retain(|e| e.adsb);
+        let note = left_off(&tracks_seen, false).unwrap();
+        assert!(note.contains("on them: 1 fix. They"), "{note}");
+        fix_seen.sites[0].tracks.retain(|e| e.adsb);
+        assert_eq!(left_off(&fix_seen, false), None);
+    }
+
+    #[test]
+    fn api_leaves_out_what_the_map_does() {
+        let ids = |j: &Value| -> Vec<u64> {
+            j["sites"][0]["tracks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["id"].as_u64().unwrap())
+                .collect()
+        };
+        let v = view(Truth::Nothing);
+        let j = api(&v, true, false);
+        assert_eq!(ids(&j), [4, 5]);
+        assert_eq!(j["fixes"], json!([]));
+        let all = api(&v, true, true);
+        assert_eq!(ids(&all), [4, 5, 6]);
+        assert_eq!(all["sites"][0]["tracks"][2]["adsb"], false);
+        assert_eq!(all["fixes"][0]["adsb"], json!({"near": false}));
+        // aircraft ids only when they are shown
+        assert_eq!(
+            api(&view(seen()), true, false)["fixes"][0]["adsb"]["hex"],
+            "a00001"
+        );
+        assert_eq!(
+            api(&view(seen()), false, false)["fixes"][0]["adsb"],
+            json!({"near": true, "err_km": 0.2})
         );
     }
 }

@@ -755,11 +755,6 @@ async fn map_page(State(app): State<Arc<App>>) -> Result<Html<String>, Fail> {
         let _ = write!(b, "<p class=mute>{}</p>", esc(&why));
         return Ok(page(&app, "/map", "Map", &b).await);
     };
-    let hidden = v
-        .fixes
-        .iter()
-        .filter(|r| !matches!(r.truth, Truth::Aircraft { .. }))
-        .count();
     let _ = write!(
         b,
         "<p class=\"mute small\">As of {}, {} behind now: detection reports reach this site in batches, so the \
@@ -782,12 +777,8 @@ async fn map_page(State(app): State<Arc<App>>) -> Result<Html<String>, Fail> {
          .catch(function(){{}})}},10000)</script>",
         map::render(&v, &map_opts(&app))
     );
-    if hidden > 0 && !app.cfg.fusion.show_unmatched {
-        let _ = write!(
-            b,
-            "<p class=\"mute small\">{hidden} fixes with no ADS-B aircraft near them are not drawn: they would show \
-             aircraft public ADS-B doesn't (set fusion.show_unmatched to draw them).</p>"
-        );
+    if let Some(note) = map::left_off(&v, app.cfg.fusion.show_unmatched) {
+        let _ = write!(b, "<p class=\"mute small\">{}</p>", esc(&note));
     }
     b.push_str(&fix_table(&app, &v));
     Ok(page(&app, "/map", "Map", &b).await)
@@ -798,9 +789,10 @@ fn fix_table(app: &App, v: &crate::hub::View) -> String {
     for s in &v.sites {
         let _ = write!(
             b,
-            "<li>{}: {} confirmed tracks</li>",
+            "<li>{}: {} confirmed tracks, {} with an ADS-B aircraft on them</li>",
             esc(&s.call),
-            s.tracks.len()
+            s.tracks.len(),
+            s.tracks.iter().filter(|e| e.adsb).count()
         );
     }
     b.push_str("</ul>");
@@ -864,43 +856,15 @@ async fn map_svg(State(app): State<Arc<App>>) -> Response {
     }
 }
 
-/// The map's moment as JSON: each site's tracks and the fixes, with the same hiding of
-/// aircraft ids and of fixes no ADS-B aircraft explains as the page.
 async fn map_json(State(app): State<Arc<App>>) -> Response {
     let Some(v) = app.live().view.clone() else {
         return (StatusCode::NOT_FOUND, "nothing worked out yet").into_response();
     };
-    let ids = app.cfg.stats.show_aircraft_ids;
-    let fixes: Vec<Value> = v
-        .fixes
-        .iter()
-        .filter(|r| shown(&app, r))
-        .map(|r| {
-            let f = &r.fix;
-            let adsb = match &r.truth {
-                Truth::Unknown => json!(null),
-                Truth::Nothing => json!({"near": false}),
-                Truth::Aircraft {
-                    hex,
-                    flight,
-                    err_km,
-                } if ids => json!({"near": true, "hex": hex, "flight": flight, "err_km": err_km}),
-                Truth::Aircraft { err_km, .. } => json!({"near": true, "err_km": err_km}),
-            };
-            json!({"track": r.track, "sites": r.sites, "lat": f.lat, "lon": f.lon, "alt_m": f.alt_m,
-                "alt_sigma_m": f.alt_sigma_m, "ve": f.ve, "vn": f.vn, "major_km": f.major_km,
-                "minor_km": f.minor_km, "angle_deg": f.angle_deg, "chi2": f.chi2, "adsb": adsb})
-        })
-        .collect();
-    let sites: Vec<Value> = v
-        .sites
-        .iter()
-        .map(|s| {
-            json!({"call": s.call, "tracks": s.tracks.iter().map(|t| json!({
-                "id": t.0, "range_km": t.1, "doppler_hz": t.2})).collect::<Vec<_>>()})
-        })
-        .collect();
-    Json(json!({"experimental": true, "ts": v.ts, "sites": sites, "fixes": fixes})).into_response()
+    let (ids, show_unmatched) = (
+        app.cfg.stats.show_aircraft_ids,
+        app.cfg.fusion.show_unmatched,
+    );
+    Json(map::api(&v, ids, show_unmatched)).into_response()
 }
 
 fn sites_section(app: &App) -> Result<String, Fail> {
@@ -942,14 +906,28 @@ fn sites_section(app: &App) -> Result<String, Fail> {
 
 fn mesh_section(app: &App, now: i64) -> Result<String, Fail> {
     let mut b = String::from("<h2>Detection reports on the mesh</h2>");
-    if app.cfg.mesh.enabled {
+    let m = &app.cfg.mesh;
+    if m.enabled {
         let _ = write!(
             b,
             "<p>Every {} s this site sends its detections (bistatic range, Doppler, SNR and time, nothing \
-             else) through the core as <code>{}</code> telemetry. No samples or audio ever leave the box.</p>",
-            app.cfg.mesh.batch_s,
-            crate::reports::KIND
+             else) through the core as <code>{}</code> telemetry. No samples or audio ever leave the box. \
+             The reports average at most {} kbit/s, signed events included ({:.1} kB a report); past \
+             that, or past {} detections in one report, the weakest detections are left out.</p>",
+            m.batch_s,
+            crate::reports::KIND,
+            m.max_kbps,
+            crate::reports::bytes_allowed(m.batch_s, m.max_kbps) as f64 / 1000.0,
+            m.max_per_batch
         );
+        let last = app.live().last_report;
+        if let Some((at, kept, left)) = last {
+            let _ = write!(
+                b,
+                "<p>Last report, {}: {kept} detections kept, {left} left out.</p>",
+                esc(&short_time(at))
+            );
+        }
     } else {
         b.push_str("<p>Sending detection reports is turned off (<code>mesh.enabled</code>).</p>");
     }
@@ -964,6 +942,11 @@ fn mesh_section(app: &App, now: i64) -> Result<String, Fail> {
         "<div class=wrap><table><tr><th>Station</th><th>Reports, 24 h</th><th>CPIs</th><th>Detections</th>\
          <th>Data</th><th>Per report</th><th>Last</th></tr>",
     );
+    let unreadable: Vec<String> = stations
+        .iter()
+        .filter(|s| s.unreadable > 0)
+        .map(|s| esc(&s.call))
+        .collect();
     for s in stations {
         let _ = write!(
             b,
@@ -977,7 +960,19 @@ fn mesh_section(app: &App, now: i64) -> Result<String, Fail> {
             esc(&short_time(s.last))
         );
     }
-    b.push_str("</table></div>");
+    b.push_str(
+        "</table></div><p class=\"mute small\">Sizes are the whole signed events, as they cross the \
+         mesh.</p>",
+    );
+    if !unreadable.is_empty() {
+        let _ = write!(
+            b,
+            "<p>Some reports from {} couldn't be read, so they count no CPIs or detections. They most \
+             likely come from another version of this app with a different report format; upgrade \
+             every site together.</p>",
+            unreadable.join(", ")
+        );
+    }
     Ok(b)
 }
 

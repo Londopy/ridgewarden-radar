@@ -142,14 +142,18 @@ async fn read_cpi(app: &App, last_truth: &mut i64) -> Result<()> {
 
 async fn send_report(app: &App) -> Result<()> {
     let fc = app.live().setup.as_ref().map(|s| s.fc);
+    let mesh = &app.cfg.mesh;
     let payload = fc.and_then(|fc| {
-        app.batch
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take(fc, app.cfg.mesh.max_per_batch)
+        app.batch.lock().unwrap_or_else(|e| e.into_inner()).take(
+            fc,
+            mesh.max_per_batch,
+            reports::budget(mesh.batch_s, mesh.max_kbps),
+        )
     });
     if let Some(p) = payload {
+        let (kept, left) = reports::kept_and_left_out(&p);
         app.core.append_telemetry(reports::KIND, p).await?;
+        app.live().last_report = Some((now_ms(), kept, left));
     }
     Ok(())
 }
@@ -229,9 +233,17 @@ async fn hub_moment(app: &Arc<App>, st: &mut HubState, t: i64) -> Result<()> {
         lon0: rx.longitude,
     };
     let calls: Vec<String> = sites.iter().map(|s| s.call.clone()).collect();
-    let (views, fixes) =
+    let (mut views, fixes) =
         tokio::task::spawn_blocking(move || hub::epoch(&sites, &frames, plane, &cfg, t)).await?;
     let truth = app.adsb_at(t);
+    let g = &app.cfg.gates;
+    hub::explain(
+        &mut views,
+        truth.as_deref(),
+        g.range_gate_km,
+        g.doppler_gate_hz,
+        t,
+    );
     let ids = hub::link(&st.prev, &fixes, &mut st.last_track);
     let rows: Vec<store::FixRow> = fixes
         .into_iter()

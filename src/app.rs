@@ -35,6 +35,8 @@ pub struct Live {
     pub adsb_ok: Option<i64>,
     pub adsb_err: Option<String>,
     pub mesh_err: Option<String>,
+    /// when this site's last report went out, and how many detections it kept and left out
+    pub last_report: Option<(i64, usize, usize)>,
     pub site_err: Option<String>,
     pub db_err: Option<String>,
     /// the last moment worked out from every site's reports, for the map
