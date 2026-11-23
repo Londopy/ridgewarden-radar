@@ -4,6 +4,22 @@ All notable changes to ridgewarden-radar are listed here. The format follows [Ke
 
 ## [Unreleased]
 
+### Added
+
+- `[mesh] max_kbps` (1 by default, up to 8): each site's detection reports average at most that, counting the signed event the core wraps around each one. Past it the weakest detections are left out and the report says how many. The setup page shows the limit, the size of every station's reports as signed events rather than bare payloads, and how many detections this site's last report kept and left out.
+
+### Changed
+
+- Detection reports carry their CPI times and detections as columns of whole numbers (range in 10 m steps, Doppler in 0.1 Hz, SNR in whole dB), about half the bytes per detection of 0.1.0's rows. This is a format break: 0.1.0 and this version can't read each other's reports, so upgrade every site together. Reports this version can't read are counted with no CPIs or detections, and the setup page names the station that sent them.
+- The map, `/map.svg` and `/api/map` leave out confirmed-track ellipses that no ADS-B aircraft explains, as they already did for fixes, unless `fusion.show_unmatched = true`. A track is explained when an ADS-B aircraft's expected range and Doppler for that site are within the match gates. The map page says how many tracks and fixes it left out, and why.
+
+### Fixed
+
+- A CPI that isn't later than the one before it, as when blah2's clock steps back, is left out of the report instead of making the whole report unreadable.
+
+- The first detection and timing message after blah2's API server starts is served as `undefined{...}`, a quirk of its server.js; it is read now instead of being rejected.
+- The README says where the blah2 and dump1090-fa formats were checked (their source, at named commits), that blah2 does the cross-ambiguity function, clutter removal and CFAR, and plainly what has not run on real hardware.
+
 ## [0.1.0] - 2026-11-20
 
 ### Added

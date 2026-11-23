@@ -9,7 +9,7 @@
 
 **Experimental. How well does a passive radar at a mesh site really see aircraft, and can several sites find one without ADS-B?**
 
-A ridgewarden app for AREDN meshes, and an experiment rather than a finished tool. A passive radar transmits nothing: it listens to an FM, DAB or TV transmitter and to that signal's echoes off aircraft. [blah2](https://github.com/30hours/blah2) does all of the signal processing. This app reads blah2's detections, checks every CPI against the aircraft a nearby ADS-B receiver reports, and keeps an honest record of what the site detects: detection probability by range and by aircraft, the rate of detections that match no aircraft, and how far out detection stays reliable. Detections, never signals or audio, go to the mesh as small telemetry reports. With two or more sites on the mesh it tracks each site's detections and works out where aircraft are from the sites' tracks alone, then says how close that came to ADS-B.
+A ridgewarden app for AREDN meshes, and an experiment rather than a finished tool. A passive radar transmits nothing: it listens to an FM, DAB or TV transmitter and to that signal's echoes off aircraft. [blah2](https://github.com/30hours/blah2) does all of the signal processing: the cross-ambiguity function (CAF) between the reference and surveillance channels, clutter removal, and CFAR detection. This app starts from blah2's detections, checks every CPI against the aircraft a nearby ADS-B receiver reports, and keeps an honest record of what the site detects: detection probability by range and by aircraft, the rate of detections that match no aircraft, and how far out detection stays reliable. Detections, never signals or audio, go to the mesh as small telemetry reports. With two or more sites on the mesh it tracks each site's detections and works out where aircraft are from the sites' tracks alone, then says how close that came to ADS-B.
 
 It needs a [ridgewarden](https://github.com/Londopy/ridgewarden) core on the same box. Spec sheet 10 of the AREDN app suite.
 
@@ -42,21 +42,30 @@ Unmatched detections are false alarms or aircraft without ADS-B, so the unmatche
 
 ## Several sites: tracking without ADS-B
 
-blah2 leaves its tracker as future work, and earlier multi-site tools matched targets using ADS-B. This app does both parts itself, on every site's reports as they come through the mesh, so any site can act as the hub:
+blah2 lists a tracker as future work (its source has an early one, off by default), and earlier multi-site tools matched targets using ADS-B. This app does both parts itself, on every site's reports as they come through the mesh, so any site can act as the hub:
 
 - **A tracker per site.** Each track is a Kalman filter on bistatic range and its rate (blah2's Doppler measures the rate, so one detection starts a track). Detections join tracks by gated nearest neighbour; a track is confirmed after 3 hits in its first 5 CPIs and ends after 6 misses in a row (all in `[tracker]`).
 - **Fixes from two or more sites.** A confirmed track only says the aircraft is somewhere on an ellipse around that site's transmitter and receiver. For every pairing of tracks from different sites, a least-squares fit of position, velocity and height over the last minute of their detections finds where the ellipses meet and stay met; a third site's track is added when it fits too. The fit's covariance gives a 1-sigma error ellipse. The height starts from a typical cruising height with a wide allowance (`alt_m`, `alt_sigma_m`), so two-site fixes carry the height uncertainty in their ellipse and three sites pin it down.
 - **Ghosts are counted, not hidden.** Two ellipses usually cross twice, and with two sites both crossings often fit about equally well; such fixes are dropped, since the data can't say which is right. Two sites' tracks of different aircraft can also fit one made-up aircraft well. Fits worse than about chance, needing more than 350 m/s, or with a 1-sigma ellipse longer than `max_error_km` are dropped too, but some ghosts remain, mostly with two sites. The performance page scores every fix against ADS-B, separately for two-site and three-site fixes: how many had an ADS-B aircraft within `truth_km`, and the median and 90% error among those (so they can't exceed `truth_km`).
 - **Fused tracks.** Fixes are followed from one moment to the next, across gaps of up to a minute; the page counts fused tracks followed for a minute or more with at least three fixes made while ADS-B was current and no ADS-B aircraft near any of them. Those are the candidates for the spec's goal of an aircraft without ADS-B tracked from two or more sites, or long-lived ghosts.
-- **Map.** The map page shows each site's transmitter and receiver, the ellipse of every confirmed track, the fixes with their error ellipses, and the ADS-B aircraft at the same moment. It is inline SVG with a small script that refreshes it every 10 seconds (`/map.svg` is the map alone); without JavaScript the page reloads once a minute. Each moment is worked out `settle_s` after it (5 minutes by default, to allow for the report batch plus the core's sync interval), once every site's reports have arrived, so the map runs that far behind live. A moment is worked out once; reports that arrive later are not used for it.
+- **Map.** The map page shows each site's transmitter and receiver, the ellipse of every confirmed track an ADS-B aircraft explains, the fixes with their error ellipses, and the ADS-B aircraft at the same moment. It is inline SVG with a small script that refreshes it every 10 seconds (`/map.svg` is the map alone); without JavaScript the page reloads once a minute. Each moment is worked out `settle_s` after it (5 minutes by default, to allow for the report batch plus the core's sync interval), once every site's reports have arrived, so the map runs that far behind live. A moment is worked out once; reports that arrive later are not used for it.
 - **Bounded work.** Each site offers at most 20 tracks (the longest) to the fit, reports are capped at 500 detections per CPI like blah2's own feed, and pairing stops after half of `every_s`, so a busy or misbehaving site can't stall the hub.
 - Each site logs its geometry (from blah2's config) as a `radar.site` event in the core's main log, so the others can use its reports. Locating needs the sites' clocks to agree to well under a second: run NTP or GPS time on every blah2 box.
 
-Fixes that no ADS-B aircraft explains locate aircraft that public ADS-B doesn't show. They are counted on the performance page but not drawn on the map, listed or returned by `/api/map` unless `fusion.show_unmatched = true`.
+Fixes and confirmed tracks that no ADS-B aircraft explains may follow aircraft that public ADS-B doesn't show. They are counted on the pages but not drawn on the map, listed or returned by `/api/map` unless `fusion.show_unmatched = true`. Even one site's track ellipses are hidden, since two sites' ellipses cross where the hidden fix would be. A track is explained when an ADS-B aircraft's bistatic range and Doppler for that site, at that moment, are within the match gates of the track's; while the ADS-B feed is down, nothing is.
 
 ## Over the mesh
 
-Every minute (by default) the app sends that minute's detections through the core as one `radar.detections` telemetry event: the start time, illuminator frequency, each CPI's time (so the tracker knows when a site looked and saw nothing) and a list of `[ms since start, range km, Doppler Hz, SNR dB]`. A busy minute is a few kilobytes. No samples, spectra or audio ever leave the box (Part 97.113(c)). The core prunes telemetry after 30 days. The setup page lists every trusted station whose reports reach this core.
+Every minute (by default) the app sends that minute's detections through the core as one `radar.detections` telemetry event: the illuminator frequency, each CPI's time (so the tracker knows when a site looked and saw nothing), and each detection's bistatic range, Doppler and SNR as columns of whole numbers (10 m, 0.1 Hz and 1 dB steps). No samples, spectra or audio ever leave the box (Part 97.113(c)). The core prunes telemetry after 30 days. The setup page lists every trusted station whose reports reach this core, and their size as signed events.
+
+Upgrade every site together. The report format changed after 0.1.0, and neither version can read the other's reports. This version still counts the ones it can't read, with no CPIs or detections, and the setup page names the station that sent them.
+
+The spec gives the reports kilobits, so each site's reports average at most `max_kbps`, 1 kbit/s unless set otherwise: 7.5 kB a minute, counting the signature, keys and counters the core wraps around each report. Past that the weakest detections are left out, and the report says how many; the setup page shows how many detections this site's last report kept and left out. Measured on simulated sites, with the reports going through real cores:
+
+- The two-site example below (25 aircraft within 30 km, 0.5 s CPIs) makes 1,200 to 2,200 detections a minute per site. Each site's reports came to 7.4 kB a minute and carried about 500 of them.
+- The simulator's defaults (12 aircraft within 60 km, about 60 false alarms a minute) made 56 to 444 detections a minute over seven minutes, most at the start while its aircraft were still spread over the area. Every one fit, in 2.0 to 6.9 kB a minute.
+
+A sky that busy loses most of its multi-site fixes. In simulated three-site runs, counting the fixes at one moment with every detection and then with the reports held to 1 kbit/s: with 30 aircraft within 30 km about a third of the detections fit, and the fixes fell from 13 to 5 in one run and from 14 to 3 in another; with 20 aircraft within 40 km half fit, and they fell from 8 to 3; with 12 aircraft within 30 km four in five fit, and the fixes were the same. Where the mesh has room, `max_kbps` goes up to 8.
 
 Raw detections and expected aircraft positions are kept 15 minutes, and every site's reported detections two hours for the tracker. Multi-site fixes are kept a week. Hourly counts by range are kept 400 days. Hourly counts per aircraft, which carry the ICAO address and callsign from the ADS-B feed, are kept 31 days, just long enough for the 30-day window. Callsigns and addresses appear only as the ADS-B feed itself gives them, and `show_aircraft_ids = false` replaces them with numbers on the pages and in `/api/stats`.
 
@@ -93,7 +102,7 @@ The pages are on `http://<box>:8802/`. Add them to the core's dashboard with an 
 ridgewarden-radar simulate --listen 127.0.0.1:3000 --rx 39.50,-104.80,1650 --tx 39.62,-104.95,2100 --fc-mhz 96.9
 ```
 
-It serves blah2's `/api/detection`, `/api/config`, `/api/timing` and `/api/timestamp`, and dump1090's `/data/aircraft.json`, in their real formats. Twelve synthetic aircraft (`--aircraft`) fly straight lines within `--radius-km` of the receivers; each CPI one is detected with a chance that falls off with bistatic range (`--r50-km`, where it is about half), with a little range and Doppler noise. There are random false alarms (`--false-per-cpi`) and two aircraft with no ADS-B (`--dark`).
+It serves blah2's `/api/detection`, `/api/config`, `/api/timing` and `/api/timestamp`, and dump1090's `/data/aircraft.json`, in the same formats; its config is a shortened blah2 `config.yml`, and its timing has only the one stage a simulator has. Twelve synthetic aircraft (`--aircraft`) fly straight lines within `--radius-km` of the receivers; each CPI one is detected with a chance that falls off with bistatic range (`--r50-km`, where it is about half), with a little range and Doppler noise. There are random false alarms (`--false-per-cpi`) and two aircraft with no ADS-B (`--dark`).
 
 For several sites, give `--listen` and `--rx` once per site (`--tx` and `--fc-mhz` once for all, or once each). Every site sees the same aircraft, so two ridgewarden cores, each with a radar app pointed at its own simulated site, exercise the whole multi-site path:
 
@@ -144,7 +153,8 @@ show_aircraft_ids = true          # false: number the aircraft instead
 [mesh]
 enabled = true
 batch_s = 60
-max_per_batch = 1000              # past this the weakest detections are left out
+max_kbps = 1                      # what the reports may average, signed events included
+max_per_batch = 1000              # past either, the weakest detections are left out
 
 [tracker]
 confirm_m = 3                     # confirmed after 3 detections in its first 5 CPIs
@@ -163,17 +173,19 @@ alt_sigma_m = 3000
 area_km = 100                     # search this far from this site's receiver
 max_error_km = 5
 truth_km = 3                      # a fix this close to an ADS-B aircraft is that aircraft
-show_unmatched = false            # draw fixes no ADS-B aircraft explains
+show_unmatched = false            # draw tracks and fixes no ADS-B aircraft explains
 ```
 
 Both feeds are read over plain HTTP on the local network.
 
 ## Limits
 
-- No real echoes yet. Everything is tested against blah2's and dump1090's documented formats, the formats' fixtures and the simulator; the numbers on a real site are what this experiment is for.
-- Two-site fixes can be ghosts, and their height is weakly known; the page measures how often against ADS-B rather than claiming otherwise. Three sites are much better. The confirmed tracks' ellipses are drawn whether or not a fix is shown, since they are only the bistatic ranges already sent over the mesh.
+- Nothing here has run on real hardware: no RSPduo or KrakenSDR, no real blah2, no real ADS-B receiver, no second site. Everything is tested against blah2's and dump1090's output formats as their source writes them (see Building from source), the fixtures and the simulator. The detection statistics, tracking, multi-site fixes and bandwidth figures in this README are simulated; the numbers on a real site are what this experiment is for.
+- Two-site fixes can be ghosts, and their height is weakly known; the page measures how often against ADS-B rather than claiming otherwise. Three sites are much better.
+- At 1 kbit/s a busy sky loses its weaker detections, and with them most of its multi-site fixes (see Over the mesh).
 - The position fit assumes level, straight flight over its one-minute window, so climbing or turning aircraft come out a little off.
 - Siting (the direct signal swamping echoes) can't be fixed in software; Pd by range and by hour of the day show its effect.
+- No illuminator database: the app uses whichever transmitter blah2 is set to. Which FM or ATSC transmitter gives the best geometry is the spec's open question, a siting job for the people running the site.
 - The spec's write-up or paper with a faculty partner isn't software and isn't here.
 - Contributing the tracker back to blah2 upstream is for the owner to offer; the tracker here is GPL-3.0 and lives in `src/track.rs`.
 - ATSC TV illuminators: blah2 takes any frequency, so they work as far as blah2 and its sample rate allow; nothing ATSC-specific is done here.
@@ -190,7 +202,7 @@ cargo build --release
 cargo test
 ```
 
-The tests use fixtures of blah2's and dump1090's real JSON formats in `fixtures/`.
+The tests read fixtures in `fixtures/` laid out as the programs' source writes them, with made-up values. For blah2, at commit [c821bee](https://github.com/30hours/blah2/tree/c821bee3f0d27cf20c8447f3d908ef722905a4de): the detection JSON from `Detection::to_json` and `delay_bin_to_km` in `src/data/Detection.cpp`, the timing JSON from `Timing::to_json` in `src/data/meta/Timing.cpp` with each stage timed on its own as `src/blah2.cpp` does, and blah2's own `config/config.yml` as `api/server.js` serves it at `/api/config`. For ADS-B, `aircraft.json` as `generateAircraftJson` in dump1090-fa's `net_io.c` writes it, at commit [465e063](https://github.com/flightaware/dump1090/tree/465e06330372ab0586a6a5063c66b60a8750f2b6) (its `README-json.md` describes the fields); a test covers how readsb's `json_out.c` differs.
 
 ## Contributing
 
