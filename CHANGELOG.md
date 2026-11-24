@@ -4,6 +4,8 @@ All notable changes to ridgewarden-radar are listed here. The format follows [Ke
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-23
+
 ### Added
 
 - `[mesh] max_kbps` (1 by default, up to 8): each site's detection reports average at most that, counting the signed event the core wraps around each one. Past it the weakest detections are left out and the report says how many. The setup page shows the limit, the size of every station's reports as signed events rather than bare payloads, and how many detections this site's last report kept and left out.
@@ -21,7 +23,6 @@ All notable changes to ridgewarden-radar are listed here. The format follows [Ke
 ### Fixed
 
 - A CPI that isn't later than the one before it, as when blah2's clock steps back, is left out of the report instead of making the whole report unreadable.
-
 - The first detection and timing message after blah2's API server starts is served as `undefined{...}`, a quirk of its server.js; it is read now instead of being rejected.
 - The README says where the blah2 and dump1090-fa formats were checked (their source, at named commits), that blah2 does the cross-ambiguity function, clutter removal and CFAR, and plainly what has not run on real hardware.
 - The README says commands that read the config run as `ridgewarden-radar` (the config is `root:ridgewarden-radar`, mode 0640), that only `install.sh` checks the release signature and how to check a `.deb` by hand, and that torrents come only for each `.deb` and `.tar.gz`.
@@ -50,5 +51,6 @@ All notable changes to ridgewarden-radar are listed here. The format follows [Ke
 - Pd by hour of the day.
 - `simulate` serves several sites seeing the same aircraft (`--listen` and `--rx` once per site), and `--radius-km`.
 
-[Unreleased]: https://github.com/Londopy/ridgewarden-radar/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Londopy/ridgewarden-radar/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Londopy/ridgewarden-radar/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Londopy/ridgewarden-radar/releases/tag/v0.1.0

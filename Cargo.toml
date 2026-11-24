@@ -1,6 +1,6 @@
 [package]
 name = "ridgewarden-radar"
-version = "0.1.0"
+version = "0.2.0"
 description = "Experimental passive radar for AREDN meshes: checks blah2 detections against ADS-B, and tracks and locates aircraft from several sites"
 edition = "2024"
 license = "GPL-3.0-or-later"
