@@ -15,7 +15,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # the core branch or tag this release builds its client crate (and signing tool) from
-  CORE_REF: main
+  CORE_REF: v0.2.0
 
 jobs:
   validate:

@@ -72,7 +72,7 @@ def magnet_link(infohash: str, name: str, size: int, url: str) -> str:
 
 
 def torrents(tag: str, dist: Path) -> None:
-    """Write a .torrent and a magnet QR code next to each download, and torrents.json
+    """Write a .torrent and a magnet QR code next to each package and archive, and torrents.json
     for the release page. Runs before SHA256SUMS.txt is made and signed, so the
     checksums cover the torrents too."""
     import segno
@@ -102,9 +102,10 @@ def torrent_section(url: str) -> str:
             for t in made]
     magnets = [f'# {t["file"]}{chr(10)}{t["magnet"]}{chr(10)}' for t in made]
     return ("## Torrents" + chr(10) * 2
-            + "Every download is also a `.torrent` with its GitHub download as the web seed: a BitTorrent client "
-              "gets it from GitHub when nobody is seeding, and from peers when they are. The magnet links carry "
-              "the same web seed, but need one peer to fetch the file list first." + chr(10) * 2
+            + "Each package and archive (`.deb`, `.tar.gz`) is also a `.torrent` with its GitHub download as the "
+              "web seed: a BitTorrent client gets it from GitHub when nobody is seeding, and from peers when they "
+              "are. The magnet links carry the same web seed, but need one peer to fetch the file list first. The "
+              "install script, checksums and signature are a few KB each and have no torrent." + chr(10) * 2
             + "| File | Torrent | Magnet (QR) |" + chr(10) + "|---|---|---|" + chr(10)
             + chr(10).join(rows) + chr(10) * 2
             + "<details><summary>Magnet links</summary>" + chr(10) * 2 + "```" + chr(10)
