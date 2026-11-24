@@ -7,9 +7,14 @@ All notable changes to ridgewarden-radar are listed here. The format follows [Ke
 ### Added
 
 - `[mesh] max_kbps` (1 by default, up to 8): each site's detection reports average at most that, counting the signed event the core wraps around each one. Past it the weakest detections are left out and the report says how many. The setup page shows the limit, the size of every station's reports as signed events rather than bare payloads, and how many detections this site's last report kept and left out.
+- `ridgewarden-radar top`, a live view in the terminal for a box run over SSH: this site's feeds and warnings, every radar station's reports (how often, kbit/s, detections sent and left out), the confirmed tracks and fixes ADS-B explains, and the statistics for a window `w` steps through. It reads the app's JSON over HTTP (`--url`, `--every`), so it needs no sudo.
+- `/api/setup`, the setup page's facts as JSON, with other stations' receivers rounded and their transmitters only named, as the page shows them. `/api/map` also says how many tracks and fixes it left out and how many ADS-B aircraft there were, and `/api/stats` gives the unmatched rate per CPI and per minute and the Pd chance matches alone would give.
+- The detections each station's reports left out are counted from the reports themselves, so every station's show, not only this site's.
 
 ### Changed
 
+- `/api/stats` lists at most the 50 aircraft with the most time in coverage, as the performance page does, and `aircraft_total` says how many there were.
+- A config whose `blah2.url` or `adsb.url` has a user name or password in it is refused, since the pages and `/api/setup` show those addresses.
 - Detection reports carry their CPI times and detections as columns of whole numbers (range in 10 m steps, Doppler in 0.1 Hz, SNR in whole dB), about half the bytes per detection of 0.1.0's rows. This is a format break: 0.1.0 and this version can't read each other's reports, so upgrade every site together. Reports this version can't read are counted with no CPIs or detections, and the setup page names the station that sent them.
 - The map, `/map.svg` and `/api/map` leave out confirmed-track ellipses that no ADS-B aircraft explains, as they already did for fixes, unless `fusion.show_unmatched = true`. A track is explained when an ADS-B aircraft's expected range and Doppler for that site are within the match gates. The map page says how many tracks and fixes it left out, and why.
 
@@ -19,6 +24,7 @@ All notable changes to ridgewarden-radar are listed here. The format follows [Ke
 
 - The first detection and timing message after blah2's API server starts is served as `undefined{...}`, a quirk of its server.js; it is read now instead of being rejected.
 - The README says where the blah2 and dump1090-fa formats were checked (their source, at named commits), that blah2 does the cross-ambiguity function, clutter removal and CFAR, and plainly what has not run on real hardware.
+- The README says commands that read the config run as `ridgewarden-radar` (the config is `root:ridgewarden-radar`, mode 0640), that only `install.sh` checks the release signature and how to check a `.deb` by hand, and that torrents come only for each `.deb` and `.tar.gz`.
 
 ## [0.1.0] - 2026-11-20
 
