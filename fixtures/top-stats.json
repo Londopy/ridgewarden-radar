@@ -1,0 +1,391 @@
+{
+  "aircraft": [
+    {
+      "flight": "TST142",
+      "hex": "~f0002a",
+      "hits": 691,
+      "max_km": 46.23909857379149,
+      "min_km": 7.192219053099467,
+      "opportunities": 897,
+      "pd": 0.770345596432553
+    },
+    {
+      "flight": "TST141",
+      "hex": "~f00029",
+      "hits": 651,
+      "max_km": 59.9049928406077,
+      "min_km": 0.7578847357717313,
+      "opportunities": 895,
+      "pd": 0.7273743016759776
+    },
+    {
+      "flight": "TST140",
+      "hex": "~f00028",
+      "hits": 533,
+      "max_km": 59.95714111679072,
+      "min_km": 8.528419017610824,
+      "opportunities": 777,
+      "pd": 0.685971685971686
+    },
+    {
+      "flight": "TST150",
+      "hex": "~f00032",
+      "hits": 455,
+      "max_km": 59.88539086147149,
+      "min_km": 7.414775608866275,
+      "opportunities": 653,
+      "pd": 0.6967840735068913
+    },
+    {
+      "flight": "TST149",
+      "hex": "~f00031",
+      "hits": 401,
+      "max_km": 59.89349767397101,
+      "min_km": 5.041498801459242,
+      "opportunities": 651,
+      "pd": 0.6159754224270353
+    },
+    {
+      "flight": "TST147",
+      "hex": "~f0002f",
+      "hits": 227,
+      "max_km": 56.20525470677703,
+      "min_km": 31.289378178607574,
+      "opportunities": 625,
+      "pd": 0.3632
+    },
+    {
+      "flight": "TST143",
+      "hex": "~f0002b",
+      "hits": 277,
+      "max_km": 59.83976045624109,
+      "min_km": 27.9389149986202,
+      "opportunities": 600,
+      "pd": 0.46166666666666667
+    },
+    {
+      "flight": "TST144",
+      "hex": "~f0002c",
+      "hits": 281,
+      "max_km": 59.84698815957412,
+      "min_km": 23.283967548225135,
+      "opportunities": 572,
+      "pd": 0.49125874125874125
+    },
+    {
+      "flight": "TST151",
+      "hex": "~f00033",
+      "hits": 373,
+      "max_km": 59.73379873950544,
+      "min_km": 1.2573033961943911,
+      "opportunities": 562,
+      "pd": 0.6637010676156584
+    },
+    {
+      "flight": "TST146",
+      "hex": "~f0002e",
+      "hits": 202,
+      "max_km": 59.897479049566726,
+      "min_km": 27.95634135241777,
+      "opportunities": 538,
+      "pd": 0.3754646840148699
+    },
+    {
+      "flight": "TST139",
+      "hex": "~f00027",
+      "hits": 374,
+      "max_km": 59.87780445557176,
+      "min_km": 0.7579224186592218,
+      "opportunities": 535,
+      "pd": 0.6990654205607477
+    },
+    {
+      "flight": "TST152",
+      "hex": "~f00034",
+      "hits": 324,
+      "max_km": 59.91237033511934,
+      "min_km": 15.117282497556927,
+      "opportunities": 503,
+      "pd": 0.6441351888667992
+    },
+    {
+      "flight": "TST136",
+      "hex": "~f00024",
+      "hits": 202,
+      "max_km": 59.884397582249385,
+      "min_km": 28.83527091551878,
+      "opportunities": 497,
+      "pd": 0.40643863179074446
+    },
+    {
+      "flight": "TST145",
+      "hex": "~f0002d",
+      "hits": 99,
+      "max_km": 59.95475650526878,
+      "min_km": 39.75161170229129,
+      "opportunities": 470,
+      "pd": 0.21063829787234042
+    },
+    {
+      "flight": "TST137",
+      "hex": "~f00025",
+      "hits": 252,
+      "max_km": 59.83390760862309,
+      "min_km": 7.472833955984225,
+      "opportunities": 408,
+      "pd": 0.6176470588235294
+    },
+    {
+      "flight": "TST138",
+      "hex": "~f00026",
+      "hits": 98,
+      "max_km": 59.851894239471704,
+      "min_km": 34.688266788650786,
+      "opportunities": 343,
+      "pd": 0.2857142857142857
+    },
+    {
+      "flight": "TST155",
+      "hex": "~f00037",
+      "hits": 86,
+      "max_km": 59.89751217388638,
+      "min_km": 36.91746207270012,
+      "opportunities": 340,
+      "pd": 0.2529411764705882
+    },
+    {
+      "flight": "TST153",
+      "hex": "~f00035",
+      "hits": 85,
+      "max_km": 58.138354615139136,
+      "min_km": 36.9775487902521,
+      "opportunities": 325,
+      "pd": 0.26153846153846155
+    },
+    {
+      "flight": "TST156",
+      "hex": "~f00038",
+      "hits": 143,
+      "max_km": 56.44785563122516,
+      "min_km": 14.007355631041232,
+      "opportunities": 296,
+      "pd": 0.4831081081081081
+    },
+    {
+      "flight": "TST157",
+      "hex": "~f00039",
+      "hits": 101,
+      "max_km": 57.664123101155226,
+      "min_km": 27.024123881666117,
+      "opportunities": 258,
+      "pd": 0.39147286821705424
+    },
+    {
+      "flight": "TST124",
+      "hex": "~f00018",
+      "hits": 69,
+      "max_km": 59.91626587590639,
+      "min_km": 36.380298308828,
+      "opportunities": 254,
+      "pd": 0.27165354330708663
+    },
+    {
+      "flight": "TST158",
+      "hex": "~f0003a",
+      "hits": 80,
+      "max_km": 57.63576526050239,
+      "min_km": 32.96519245758065,
+      "opportunities": 250,
+      "pd": 0.32
+    },
+    {
+      "flight": "TST128",
+      "hex": "~f0001c",
+      "hits": 50,
+      "max_km": 59.91921947624981,
+      "min_km": 39.40074077811534,
+      "opportunities": 232,
+      "pd": 0.21551724137931033
+    },
+    {
+      "flight": "TST159",
+      "hex": "~f0003b",
+      "hits": 75,
+      "max_km": 59.87677761683827,
+      "min_km": 19.929345980348884,
+      "opportunities": 189,
+      "pd": 0.3968253968253968
+    },
+    {
+      "flight": "TST135",
+      "hex": "~f00023",
+      "hits": 14,
+      "max_km": 59.81722503422039,
+      "min_km": 44.340341954103614,
+      "opportunities": 118,
+      "pd": 0.11864406779661017
+    },
+    {
+      "flight": "TST122",
+      "hex": "~f00016",
+      "hits": 15,
+      "max_km": 59.851535675688396,
+      "min_km": 50.350906859841196,
+      "opportunities": 91,
+      "pd": 0.16483516483516483
+    },
+    {
+      "flight": "TST161",
+      "hex": "~f0003d",
+      "hits": 8,
+      "max_km": 59.71533634560166,
+      "min_km": 53.07109589262857,
+      "opportunities": 50,
+      "pd": 0.16
+    },
+    {
+      "flight": "TST119",
+      "hex": "~f00013",
+      "hits": 4,
+      "max_km": 59.85714179183227,
+      "min_km": 56.29218034576428,
+      "opportunities": 37,
+      "pd": 0.10810810810810811
+    },
+    {
+      "flight": "TST162",
+      "hex": "~f0003e",
+      "hits": 3,
+      "max_km": 57.51639442678468,
+      "min_km": 55.48922543975698,
+      "opportunities": 18,
+      "pd": 0.16666666666666666
+    }
+  ],
+  "aircraft_detected": 28,
+  "aircraft_judged": 28,
+  "bins": [
+    {
+      "from_km": 0,
+      "hits": 344,
+      "opportunities": 364,
+      "pd": 0.945054945054945,
+      "to_km": 5
+    },
+    {
+      "from_km": 5,
+      "hits": 725,
+      "opportunities": 770,
+      "pd": 0.9415584415584416,
+      "to_km": 10
+    },
+    {
+      "from_km": 10,
+      "hits": 717,
+      "opportunities": 776,
+      "pd": 0.9239690721649485,
+      "to_km": 15
+    },
+    {
+      "from_km": 15,
+      "hits": 721,
+      "opportunities": 798,
+      "pd": 0.9035087719298246,
+      "to_km": 20
+    },
+    {
+      "from_km": 20,
+      "hits": 631,
+      "opportunities": 763,
+      "pd": 0.8269986893840104,
+      "to_km": 25
+    },
+    {
+      "from_km": 25,
+      "hits": 681,
+      "opportunities": 1019,
+      "pd": 0.6683022571148185,
+      "to_km": 30
+    },
+    {
+      "from_km": 30,
+      "hits": 736,
+      "opportunities": 1335,
+      "pd": 0.5513108614232209,
+      "to_km": 35
+    },
+    {
+      "from_km": 35,
+      "hits": 641,
+      "opportunities": 1487,
+      "pd": 0.43106926698049763,
+      "to_km": 40
+    },
+    {
+      "from_km": 40,
+      "hits": 416,
+      "opportunities": 1405,
+      "pd": 0.296085409252669,
+      "to_km": 45
+    },
+    {
+      "from_km": 45,
+      "hits": 259,
+      "opportunities": 1161,
+      "pd": 0.223083548664944,
+      "to_km": 50
+    },
+    {
+      "from_km": 50,
+      "hits": 191,
+      "opportunities": 1129,
+      "pd": 0.1691762621789194,
+      "to_km": 55
+    },
+    {
+      "from_km": 55,
+      "hits": 111,
+      "opportunities": 977,
+      "pd": 0.11361310133060389,
+      "to_km": 60
+    }
+  ],
+  "chance_pd": 0.00404421351725659,
+  "cpis": 1062,
+  "detected_hits": 3,
+  "detections": 7647,
+  "experimental": true,
+  "from": 1795392000000,
+  "generated": 1795478972398,
+  "hits": 6173,
+  "min_opportunities": 30,
+  "multi_site": {
+    "three_or_more": {
+      "fixes": 49,
+      "matched": 21,
+      "median_km": 0.04200147270715156,
+      "p90_km": 0.11723923396533562,
+      "scored": 27,
+      "tracks_without_ads_b": 1
+    },
+    "tracks": 74,
+    "two_sites": {
+      "fixes": 194,
+      "matched": 42,
+      "median_km": 0.0925331343791411,
+      "p90_km": 1.7673558565551553,
+      "scored": 86,
+      "tracks_without_ads_b": 1
+    }
+  },
+  "opportunities": 11984,
+  "pd": 0.5151034712950601,
+  "pd_threshold": 0.8,
+  "reliable_km": 25,
+  "setup_changed": null,
+  "unmatched": 1471,
+  "unmatched_per_cpi": 1.3851224105461393,
+  "unmatched_per_min": 166.21468926553672,
+  "window": "24h",
+  "aircraft_total": 29
+}

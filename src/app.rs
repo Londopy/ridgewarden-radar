@@ -75,6 +75,7 @@ impl App {
         }
         let core = CoreClient::new(&cfg.core.url, token)?;
         let db = open_db(&cfg.db_path(), PROJECTIONS)?;
+        crate::reports::migrate(&db)?;
         db.execute_batch(crate::store::SCHEMA)?;
         let http = reqwest::Client::builder()
             .no_proxy()

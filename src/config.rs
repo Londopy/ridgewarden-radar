@@ -364,8 +364,14 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         for (name, url) in [("blah2.url", &self.blah2.url), ("adsb.url", &self.adsb.url)] {
-            if !url.starts_with("http://") {
+            let Some(rest) = url.strip_prefix("http://") else {
                 bail!("{name} must be an http:// URL, not {url:?}");
+            };
+            // the pages and /api/setup show these addresses, so they can't carry a password,
+            // and nor does this error
+            let host = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+            if host.contains('@') {
+                bail!("{name} must not have a user name or password before its host");
             }
         }
         if self.blah2.poll_ms < 100 {
@@ -553,6 +559,16 @@ mod tests {
         assert!(c.validate().is_err());
         let c: Config = toml::from_str("[adsb]\nurl = \"https://x/aircraft.json\"").unwrap();
         assert!(c.validate().is_err());
+        let c: Config =
+            toml::from_str("[blah2]\nurl = \"http://radar:hunter2@127.0.0.1:3000\"").unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("user name or password") && !err.contains("hunter2"),
+            "{err}"
+        );
+        let c: Config =
+            toml::from_str("[adsb]\nurl = \"http://127.0.0.1/data/aircraft.json?by=a@b\"").unwrap();
+        c.validate().unwrap();
         assert!(toml::from_str::<Config>("[site]\nlat = 1").is_err());
         let c: Config = toml::from_str("[fusion]\nsettle_s = 30").unwrap();
         assert!(c.validate().is_err(), "settle_s under batch_s");

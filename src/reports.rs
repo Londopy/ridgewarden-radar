@@ -200,14 +200,26 @@ fn parse_site_payload(p: &Value) -> Option<Setup> {
     })
 }
 
-type Parsed = (Vec<i64>, Vec<(i64, Det)>);
+/// What one report carries.
+#[derive(Default)]
+struct Report {
+    cpis: Vec<i64>,
+    dets: Vec<(i64, Det)>,
+    /// detections the sender left out to stay inside its budget
+    dropped: i64,
+}
 
 /// A report's CPI times and detections, if it is well formed. Reports from 0.1.0 (rows
 /// instead of columns, `"v": 1`) are not read.
-fn parse_report(p: &Value) -> Option<Parsed> {
+fn parse_report(p: &Value) -> Option<Report> {
     if p.get("v")?.as_i64()? != 2 {
         return None;
     }
+    // far more than any blah2 could leave out of one report; the cap keeps sums in range
+    let dropped = p
+        .get("dropped")?
+        .as_i64()
+        .filter(|n| (0..=1_000_000_000).contains(n))?;
     // a report from the future is a broken clock, and would never be pruned
     let t0 = p
         .get("t0")?
@@ -256,7 +268,11 @@ fn parse_report(p: &Value) -> Option<Parsed> {
             j += 1;
         }
     }
-    Some((cpis, dets))
+    Some(Report {
+        cpis,
+        dets,
+        dropped,
+    })
 }
 
 pub struct Reports;
@@ -269,7 +285,8 @@ CREATE TABLE IF NOT EXISTS reports (
     call       TEXT NOT NULL,
     cpis       INTEGER NOT NULL,
     dets       INTEGER NOT NULL,
-    bytes      INTEGER NOT NULL
+    bytes      INTEGER NOT NULL,
+    dropped    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS reports_ts ON reports(ts);
 CREATE TABLE IF NOT EXISTS radar_sites (
@@ -337,10 +354,14 @@ impl Projection for Reports {
             return Ok(());
         }
         // one this version can't read, such as 0.1.0's, still counts, with nothing in it
-        let (cpis, dets) = parse_report(&e.payload).unwrap_or_default();
+        let Report {
+            cpis,
+            dets,
+            dropped,
+        } = parse_report(&e.payload).unwrap_or_default();
         let added = tx.execute(
-            "INSERT OR IGNORE INTO reports (event_id, ts, author_key, call, cpis, dets, bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR IGNORE INTO reports (event_id, ts, author_key, call, cpis, dets, bytes, dropped)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 e.id,
                 ts,
@@ -349,7 +370,8 @@ impl Projection for Reports {
                 cpis.len() as i64,
                 dets.len() as i64,
                 // the whole signed event, as it crosses the mesh
-                serde_json::to_string(e)?.len() as i64
+                serde_json::to_string(e)?.len() as i64,
+                dropped
             ],
         )?;
         // replaying a long feed history: only recent reports are worth tracking
@@ -472,35 +494,70 @@ pub fn frames(conn: &Connection, key: &str, from: i64, to: i64) -> Result<Vec<Fr
 }
 
 /// One station's reports since some time.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Station {
+    pub key: String,
     pub call: String,
     pub reports: i64,
     pub cpis: i64,
     pub dets: i64,
+    /// detections its reports left out to stay inside its budget
+    pub dropped: i64,
     pub bytes: i64,
+    pub first: i64,
     pub last: i64,
     /// reports this version couldn't read, counted with no CPIs
     pub unreadable: i64,
 }
 
+impl Station {
+    /// The time between its reports, on average, once there are two.
+    pub fn every_ms(&self) -> Option<i64> {
+        (self.reports > 1).then(|| (self.last - self.first) / (self.reports - 1))
+    }
+
+    /// What its reports average on the mesh in kbit/s, signed events and all.
+    pub fn kbps(&self) -> Option<f64> {
+        let every = self.every_ms().filter(|ms| *ms > 0)?;
+        // bytes a report times 8 is bits; bits per millisecond are kbit/s
+        Some(self.bytes as f64 / self.reports as f64 * 8.0 / every as f64)
+    }
+}
+
 pub fn stations(conn: &Connection, from: i64) -> Result<Vec<Station>> {
     let mut st = conn.prepare(
-        "SELECT max(call), count(*), sum(cpis), sum(dets), sum(bytes), max(ts), sum(cpis = 0)
+        "SELECT author_key, max(call), count(*), sum(cpis), sum(dets), sum(dropped), sum(bytes),
+                min(ts), max(ts), sum(cpis = 0)
          FROM reports WHERE ts >= ?1 GROUP BY author_key ORDER BY max(call)",
     )?;
     let rows = st.query_map([from], |r| {
         Ok(Station {
-            call: r.get(0)?,
-            reports: r.get(1)?,
-            cpis: r.get(2)?,
-            dets: r.get(3)?,
-            bytes: r.get(4)?,
-            last: r.get(5)?,
-            unreadable: r.get(6)?,
+            key: r.get(0)?,
+            call: r.get(1)?,
+            reports: r.get(2)?,
+            cpis: r.get(3)?,
+            dets: r.get(4)?,
+            dropped: r.get(5)?,
+            bytes: r.get(6)?,
+            first: r.get(7)?,
+            last: r.get(8)?,
+            unreadable: r.get(9)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Add what a 0.1.0 database lacks.
+pub fn migrate(conn: &Connection) -> Result<()> {
+    let has: bool = conn.query_row(
+        "SELECT count(*) > 0 FROM pragma_table_info('reports') WHERE name = 'dropped'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        conn.execute_batch("ALTER TABLE reports ADD COLUMN dropped INTEGER NOT NULL DEFAULT 0")?;
+    }
+    Ok(())
 }
 
 pub fn prune(conn: &Connection, now: i64) -> Result<()> {
@@ -577,7 +634,12 @@ mod tests {
         assert_eq!(p["f"], json!([-400, -408, -415, -400]));
         assert_eq!(p["s"], json!([12, 13, 14, 12]));
         assert_eq!(p["dropped"], 0);
-        let (cpis, dets) = parse_report(&p).unwrap();
+        let Report {
+            cpis,
+            dets,
+            dropped,
+        } = parse_report(&p).unwrap();
+        assert_eq!(dropped, 0);
         assert_eq!(cpis, [t0, t0 + 751, t0 + 1500]);
         let times: Vec<i64> = dets.iter().map(|d| d.0).collect();
         assert_eq!(times, [t0, t0, t0, t0 + 1500]);
@@ -630,9 +692,13 @@ mod tests {
             let case = format!("{batch_s} s of {cpi_ms} ms CPIs: {bytes} of {allowed} bytes");
             assert!(bytes <= allowed, "{case}");
             assert!(bytes > allowed * 9 / 10, "budget left unused, {case}");
-            let (cpis, dets) = parse_report(&p).unwrap();
+            let Report {
+                cpis,
+                dets,
+                dropped,
+            } = parse_report(&p).unwrap();
             assert_eq!(
-                dets.len() + p["dropped"].as_u64().unwrap() as usize,
+                dets.len() + dropped as usize,
                 n as usize * per_cpi,
                 "{case}"
             );
@@ -697,9 +763,24 @@ mod tests {
         // the whole signed event is counted, not just its payload
         let s = stations(&f.conn, 0).unwrap();
         assert!(s[0].bytes as usize > good.to_string().len() + 300);
-        let report = |c: Value, n: Value, r: Value| json!({"v": 2, "t0": now - 1000, "c": c, "n": n, "r": r, "f": [1], "s": [1]});
+        let report = |c: Value, n: Value, r: Value| json!({"v": 2, "t0": now - 1000, "c": c, "n": n, "r": r, "f": [1], "s": [1], "dropped": 0});
         assert!(parse_report(&report(json!([0]), json!([1]), json!([1]))).is_some());
+        let left_out = |d: Value| {
+            let mut p = report(json!([0]), json!([1]), json!([1]));
+            p["dropped"] = d;
+            p
+        };
+        let most = parse_report(&left_out(json!(1_000_000_000))).unwrap();
+        assert_eq!(most.dropped, 1_000_000_000, "the most a report may say");
+        let mut silent = report(json!([0]), json!([1]), json!([1]));
+        silent.as_object_mut().unwrap().remove("dropped");
         let bad = [
+            silent,
+            left_out(json!(1_000_000_001)),
+            left_out(json!(-1)),
+            left_out(json!(2_000_000_000)),
+            left_out(json!("many")),
+            left_out(json!(null)),
             report(json!([0]), json!([1]), json!(["x"])),
             report(json!([0]), json!([1]), json!("lots")),
             report(json!([0]), json!([1]), json!([1, 2])),
@@ -711,9 +792,9 @@ mod tests {
             report(json!([0]), json!([1]), json!([1e9])),
             report(json!([0]), json!([i64::MAX]), json!([1])),
             report(json!([0]), json!([1]), json!([i64::MIN])),
-            json!({"v": 2, "t0": i64::MAX - 10, "c": [0], "n": [1], "r": [1], "f": [1], "s": [1]}),
-            json!({"v": 2, "t0": now - 1000, "c": [0], "n": [1], "r": [1], "f": [], "s": [1]}),
-            json!({"v": 2, "t0": now - 1000, "c": [0], "n": [1], "r": [1], "f": [1], "s": []}),
+            json!({"v": 2, "t0": i64::MAX - 10, "c": [0], "n": [1], "r": [1], "f": [1], "s": [1], "dropped": 0}),
+            json!({"v": 2, "t0": now - 1000, "c": [0], "n": [1], "r": [1], "f": [], "s": [1], "dropped": 0}),
+            json!({"v": 2, "t0": now - 1000, "c": [0], "n": [1], "r": [1], "f": [1], "s": [], "dropped": 0}),
             // what 0.1.0 sent
             json!({"v": 1, "t0": now, "c": [0], "d": [[0, 2.5, 3.0, 4.0]]}),
         ];
@@ -750,6 +831,65 @@ mod tests {
             .query_row("SELECT count(*) FROM mesh_det", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn stations_count_what_their_reports_left_out() {
+        let mut f = Fake::new(vec![Box::new(Reports)]);
+        let t = now_ms() - 600_000;
+        // 30, 5 and 40 detections, at most 10 a report
+        for (k, n) in [30, 5, 40].into_iter().enumerate() {
+            let at = t + k as i64 * 60_000;
+            let mut b = Batch::default();
+            b.push(&frame(at, n));
+            f.add(KIND, b.take(96.9e6, 10, 7000).unwrap(), at);
+        }
+        let s = &stations(&f.conn, 0).unwrap()[0];
+        assert_eq!((s.reports, s.dets, s.dropped), (3, 25, 50));
+        assert_eq!(
+            (s.first, s.last, s.every_ms()),
+            (t, t + 120_000, Some(60_000))
+        );
+    }
+
+    #[test]
+    fn report_rates_come_from_the_time_between_reports() {
+        let s = Station {
+            key: "aa".into(),
+            call: "N0TEST".into(),
+            reports: 3,
+            cpis: 360,
+            dets: 900,
+            dropped: 0,
+            bytes: 22_500,
+            first: 1_000,
+            last: 121_000,
+            unreadable: 0,
+        };
+        // 7.5 kB a minute is the default budget's 1 kbit/s
+        assert_eq!(s.every_ms(), Some(60_000));
+        assert!((s.kbps().unwrap() - 1.0).abs() < 1e-9);
+        let one = Station { reports: 1, ..s };
+        assert_eq!((one.every_ms(), one.kbps()), (None, None));
+    }
+
+    #[test]
+    fn a_0_1_0_database_gains_the_left_out_count() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE reports (event_id TEXT PRIMARY KEY, ts INTEGER NOT NULL,
+                 author_key TEXT NOT NULL, call TEXT NOT NULL, cpis INTEGER NOT NULL,
+                 dets INTEGER NOT NULL, bytes INTEGER NOT NULL);
+             INSERT INTO reports VALUES ('e1', 5, 'aa', 'N0OLD', 120, 40, 900);",
+        )
+        .unwrap();
+        migrate(&c).unwrap();
+        migrate(&c).unwrap();
+        let s = stations(&c, 0).unwrap();
+        assert_eq!(
+            (s[0].call.as_str(), s[0].dets, s[0].dropped),
+            ("N0OLD", 40, 0)
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub mod reports;
 pub mod sim;
 pub mod stats;
 pub mod store;
+pub mod top;
 pub mod track;
 pub mod truth;
 pub mod web;

@@ -86,8 +86,8 @@ pub fn drawn(show_unmatched: bool, e: &Ellipse) -> bool {
     show_unmatched || e.adsb
 }
 
-/// The line under the map saying what it left out and why, if anything.
-pub fn left_off(v: &View, show_unmatched: bool) -> Option<String> {
+/// How many fixes and track ellipses the map leaves out.
+fn hidden(v: &View, show_unmatched: bool) -> (usize, usize) {
     let fixes = v.fixes.iter().filter(|r| !shown(show_unmatched, r)).count();
     let tracks = v
         .sites
@@ -95,6 +95,12 @@ pub fn left_off(v: &View, show_unmatched: bool) -> Option<String> {
         .flat_map(|s| &s.tracks)
         .filter(|e| !drawn(show_unmatched, e))
         .count();
+    (fixes, tracks)
+}
+
+/// The line under the map saying what it left out and why, if anything.
+pub fn left_off(v: &View, show_unmatched: bool) -> Option<String> {
+    let (fixes, tracks) = hidden(v, show_unmatched);
     let parts: Vec<String> = [
         (fixes, "fix", "fixes"),
         (tracks, "track ellipse", "track ellipses"),
@@ -118,8 +124,8 @@ pub fn left_off(v: &View, show_unmatched: bool) -> Option<String> {
     ))
 }
 
-/// The map's moment as JSON, leaving out what the map leaves out, with ADS-B aircraft
-/// ids only if `ids`.
+/// The map's moment as JSON, leaving out what the map leaves out (and saying how much),
+/// with ADS-B aircraft ids only if `ids`.
 pub fn api(v: &View, ids: bool, show_unmatched: bool) -> Value {
     let fixes: Vec<Value> = v
         .fixes
@@ -155,10 +161,14 @@ pub fn api(v: &View, ids: bool, show_unmatched: bool) -> Value {
                         "adsb": e.adsb})
                 })
                 .collect();
-            json!({"call": s.call, "tracks": tracks})
+            json!({"call": s.call, "confirmed": s.tracks.len(),
+                "with_adsb": s.tracks.iter().filter(|e| e.adsb).count(), "tracks": tracks})
         })
         .collect();
-    json!({"experimental": true, "ts": v.ts, "sites": sites, "fixes": fixes})
+    let (fixes_off, tracks_off) = hidden(v, show_unmatched);
+    json!({"experimental": true, "ts": v.ts, "adsb": v.truth.as_ref().map(Vec::len),
+        "show_unmatched": show_unmatched, "left_off": {"tracks": tracks_off, "fixes": fixes_off},
+        "sites": sites, "fixes": fixes})
 }
 
 pub fn render(v: &View, o: &Opts) -> String {
@@ -447,12 +457,22 @@ mod tests {
                 .map(|t| t["id"].as_u64().unwrap())
                 .collect()
         };
-        let v = view(Truth::Nothing);
+        let mut v = view(Truth::Nothing);
         let j = api(&v, true, false);
         assert_eq!(ids(&j), [4, 5]);
         assert_eq!(j["fixes"], json!([]));
+        // and says how much it left out, and that there was no ADS-B to go by
+        assert_eq!(j["left_off"], json!({"tracks": 1, "fixes": 1}));
+        assert_eq!(
+            (&j["sites"][0]["confirmed"], &j["sites"][0]["with_adsb"]),
+            (&json!(3), &json!(2))
+        );
+        assert_eq!(j["adsb"], json!(null));
+        v.truth = Some(vec![]);
+        assert_eq!(api(&v, true, false)["adsb"], 0);
         let all = api(&v, true, true);
         assert_eq!(ids(&all), [4, 5, 6]);
+        assert_eq!(all["left_off"], json!({"tracks": 0, "fixes": 0}));
         assert_eq!(all["sites"][0]["tracks"][2]["adsb"], false);
         assert_eq!(all["fixes"][0]["adsb"], json!({"near": false}));
         // aircraft ids only when they are shown

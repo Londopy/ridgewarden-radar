@@ -1,9 +1,10 @@
 //! The performance page, recent detections against ADS-B, the map, a plain description of
-//! the setup, and the statistics and the map as JSON.
+//! the setup, and the statistics, the map and the setup as JSON.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -19,6 +20,7 @@ use crate::app::App;
 use crate::blah2::Setup;
 use crate::map;
 use crate::plot::{self, Trace, pd_bars, scatter};
+use crate::reports::{SiteGeo, Station};
 use crate::stats::{
     FixGroup, Summary, aircraft_seen, chance_pd, fix_stats, hours, pd, reliable_km, summary,
 };
@@ -42,6 +44,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/map", get(map_page))
         .route("/map.svg", get(map_svg))
         .route("/api/map", get(map_json))
+        .route("/api/setup", get(setup_json))
         .route("/api/stats", get(stats_json))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(app)
@@ -86,7 +89,7 @@ fn heading(title: &str) -> String {
     )
 }
 
-fn pct(x: Option<f64>) -> String {
+pub(crate) fn pct(x: Option<f64>) -> String {
     x.map_or("-".into(), |p| format!("{:.0}%", p * 100.0))
 }
 
@@ -94,92 +97,80 @@ fn banner(b: &mut String, text: &str) {
     let _ = write!(b, "<div class=banner>{}</div>", esc(text));
 }
 
-/// Banners for anything that makes the numbers incomplete right now.
-fn notes(app: &App, now: i64) -> String {
-    let live = app.live();
+fn banners(notes: &[String]) -> String {
     let mut b = String::new();
-    let url = &app.cfg.blah2.url;
-    match (&live.setup, &live.setup_err) {
-        (None, Some(e)) => banner(
-            &mut b,
-            &format!(
-                "Can't read blah2's config at {url}/api/config: {e}. Nothing is checked until it can."
-            ),
-        ),
-        (None, None) => banner(
-            &mut b,
-            &format!("Waiting for blah2's config from {url}/api/config."),
-        ),
-        (Some(s), _) if !s.detection => banner(
-            &mut b,
-            "blah2's detector is turned off (process.detection.enable in its config.yml), so there are no detections to check.",
-        ),
-        _ => {}
-    }
-    if let (Some(_), Some(e)) = (&live.setup, &live.blah2_err) {
-        banner(&mut b, &format!("Can't read blah2 at {url}: {e}."));
-    }
-    let max_age = app.cfg.adsb.max_age_s as i64 * 1000;
-    match live.last_cpi {
-        Some(t) if now - t > 60_000 => banner(
-            &mut b,
-            &format!(
-                "No new CPI from blah2 for {} (last at {}).",
-                human_duration(now - t),
-                short_time(t)
-            ),
-        ),
-        Some(t) if (t - now).abs() > max_age => banner(
-            &mut b,
-            &format!(
-                "blah2's clock is {:.0} s off this box's. CPIs are not counted until the clocks agree.",
-                (t - now) as f64 / 1000.0
-            ),
-        ),
-        _ => {}
-    }
-    if live.adsb_ok.is_none_or(|t| now - t > max_age) {
-        let why = live.adsb_err.as_deref().unwrap_or("no answer yet");
-        banner(
-            &mut b,
-            &format!(
-                "No current ADS-B data from {} ({why}). CPIs are not counted while the truth feed is down, \
-                 since every detection would look like a false alarm.",
-                app.cfg.adsb.url
-            ),
-        );
-    }
-    if let Some(e) = &live.db_err {
-        banner(
-            &mut b,
-            &format!("CPIs can't be recorded, so the statistics are missing them: {e}."),
-        );
-    }
-    if let Some(e) = &live.hub_err {
-        banner(
-            &mut b,
-            &format!("Locating aircraft from the sites' reports failed: {e}."),
-        );
-    }
-    if let Some(e) = &live.site_err {
-        banner(
-            &mut b,
-            &format!(
-                "This site's geometry can't be logged through the core, so other sites can't use its reports: {e}."
-            ),
-        );
-    }
-    if let Some(e) = &live.mesh_err {
-        banner(
-            &mut b,
-            &format!("Detection reports can't be sent through the core: {e}."),
-        );
+    for n in notes {
+        banner(&mut b, n);
     }
     b
 }
 
-/// (query value, label, hours)
-const WINDOWS: &[(&str, &str, i64)] = &[
+/// Anything that makes the numbers incomplete right now, a sentence each.
+fn notes(app: &App, now: i64) -> Vec<String> {
+    let live = app.live();
+    let mut n = vec![];
+    let url = &app.cfg.blah2.url;
+    match (&live.setup, &live.setup_err) {
+        (None, Some(e)) => n.push(format!(
+            "Can't read blah2's config at {url}/api/config: {e}. Nothing is checked until it can."
+        )),
+        (None, None) => n.push(format!("Waiting for blah2's config from {url}/api/config.")),
+        (Some(s), _) if !s.detection => n.push(
+            "blah2's detector is turned off (process.detection.enable in its config.yml), so there are no detections to check."
+                .into(),
+        ),
+        _ => {}
+    }
+    if let (Some(_), Some(e)) = (&live.setup, &live.blah2_err) {
+        n.push(format!("Can't read blah2 at {url}: {e}."));
+    }
+    let max_age = app.cfg.adsb.max_age_s as i64 * 1000;
+    match live.last_cpi {
+        Some(t) if now - t > 60_000 => n.push(format!(
+            "No new CPI from blah2 for {} (last at {}).",
+            human_duration(now - t),
+            short_time(t)
+        )),
+        Some(t) if (t - now).abs() > max_age => n.push(format!(
+            "blah2's clock is {:.0} s off this box's. CPIs are not counted until the clocks agree.",
+            (t - now) as f64 / 1000.0
+        )),
+        _ => {}
+    }
+    if live.adsb_ok.is_none_or(|t| now - t > max_age) {
+        let why = live.adsb_err.as_deref().unwrap_or("no answer yet");
+        n.push(format!(
+            "No current ADS-B data from {} ({why}). CPIs are not counted while the truth feed is down, \
+             since every detection would look like a false alarm.",
+            app.cfg.adsb.url
+        ));
+    }
+    if let Some(e) = &live.db_err {
+        n.push(format!(
+            "CPIs can't be recorded, so the statistics are missing them: {e}."
+        ));
+    }
+    if let Some(e) = &live.hub_err {
+        n.push(format!(
+            "Locating aircraft from the sites' reports failed: {e}."
+        ));
+    }
+    if let Some(e) = &live.site_err {
+        n.push(format!(
+            "This site's geometry can't be logged through the core, so other sites can't use its reports: {e}."
+        ));
+    }
+    if let Some(e) = &live.mesh_err {
+        n.push(format!(
+            "Detection reports can't be sent through the core: {e}."
+        ));
+    }
+    n
+}
+
+/// The statistics windows, for the pages, `/api/stats` and the terminal view: (query
+/// value, label, hours).
+pub(crate) const WINDOWS: &[(&str, &str, i64)] = &[
     ("1h", "1 hour", 1),
     ("24h", "24 hours", 24),
     ("7d", "7 days", 168),
@@ -260,19 +251,37 @@ fn reliable_text(app: &App, s: &Summary) -> (String, String) {
     }
 }
 
-fn cards(app: &App, s: &Summary, setup: Option<&Setup>) -> String {
+/// Unmatched detections in a window: per CPI, per minute, and the Pd chance matches with
+/// them alone would give. The last two need blah2's CPI and search area.
+struct Unmatched {
+    per_cpi: f64,
+    per_min: Option<f64>,
+    chance_pd: Option<f64>,
+}
+
+/// None until a CPI has been checked.
+fn unmatched(app: &App, s: &Summary, setup: Option<&Setup>) -> Option<Unmatched> {
+    let per_cpi = (s.cpis > 0).then(|| s.unmatched as f64 / s.cpis as f64)?;
+    let g = &app.cfg.gates;
+    Some(Unmatched {
+        per_cpi,
+        per_min: setup.map(|c| per_cpi * 60.0 / c.cpi_s),
+        chance_pd: setup.map(|c| chance_pd(per_cpi, g.range_gate_km, g.doppler_gate_hz, &c.window)),
+    })
+}
+
+fn cards(app: &App, s: &Summary, u: &Unmatched) -> String {
     let st = &app.cfg.stats;
     let (judged, seen) = aircraft_seen(&s.planes, st.min_opportunities, st.detected_hits);
     let (reliable, reliable_why) = reliable_text(app, s);
-    let per_cpi = s.unmatched as f64 / s.cpis as f64;
-    let per_min = setup.map_or(String::new(), |c| {
-        format!(", about {:.1} a minute", per_cpi * 60.0 / c.cpi_s)
-    });
-    let chance = setup.map_or(String::new(), |c| {
-        let g = &app.cfg.gates;
+    let per_cpi = u.per_cpi;
+    let per_min = u
+        .per_min
+        .map_or(String::new(), |m| format!(", about {m:.1} a minute"));
+    let chance = u.chance_pd.map_or(String::new(), |p| {
         format!(
             "; chance matches with false alarms alone would give about {:.1}%",
-            chance_pd(per_cpi, g.range_gate_km, g.doppler_gate_hz, &c.window) * 100.0
+            p * 100.0
         )
     });
     format!(
@@ -323,11 +332,14 @@ fn thin(app: &App, opps: i64) -> &'static str {
     }
 }
 
+/// Aircraft the page and `/api/stats` list at most: those with the most time in coverage.
+const LISTED: usize = 50;
+
 fn aircraft_table(app: &App, s: &Summary) -> String {
     let mut b = String::from(
         "<div class=wrap><table><tr><th>Aircraft</th><th>CPIs in coverage</th><th>Detected</th><th>Pd</th><th>Bistatic range in coverage</th></tr>",
     );
-    for (n, p) in s.planes.iter().take(50).enumerate() {
+    for (n, p) in s.planes.iter().take(LISTED).enumerate() {
         let _ = write!(
             b,
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}{}</td><td>{:.0}-{:.0} km</td></tr>",
@@ -346,10 +358,10 @@ fn aircraft_table(app: &App, s: &Summary) -> String {
         );
     }
     b.push_str("</table></div>");
-    if s.planes.len() > 50 {
+    if s.planes.len() > LISTED {
         let _ = write!(
             b,
-            "<p class=\"mute small\">The 50 aircraft with the most time in coverage, of {}.</p>",
+            "<p class=\"mute small\">The {LISTED} aircraft with the most time in coverage, of {}.</p>",
             s.planes.len()
         );
     }
@@ -427,7 +439,7 @@ async fn performance_page(
         "<p class=\"mute small\">How often blah2 at this site detects the aircraft ADS-B says are inside its \
          coverage, checked CPI by CPI. Research numbers from an experiment, not a surveillance service.</p>",
     );
-    b.push_str(&notes(&app, now));
+    b.push_str(&banners(&notes(&app, now)));
     if let Some(t) = changed {
         banner(
             &mut b,
@@ -446,14 +458,14 @@ async fn performance_page(
         s.cpis,
         s.dets
     );
-    if s.cpis == 0 {
+    let Some(u) = unmatched(&app, &s, setup.as_ref()) else {
         b.push_str(
             "<p class=mute>No CPIs checked against ADS-B in this window yet. They are counted once blah2 \
              and the ADS-B feed are both answering.</p>",
         );
         return Ok(page(&app, "/", "Performance", &b).await);
-    }
-    b.push_str(&cards(&app, &s, setup.as_ref()));
+    };
+    b.push_str(&cards(&app, &s, &u));
     b.push_str("<h2>By bistatic range</h2>");
     b.push_str(&pd_bars(
         &s.bins,
@@ -518,7 +530,7 @@ async fn recent_page(
     };
     let from = now - (minutes * 60_000).min(RECENT_MS);
     let mut b = heading("Detections vs ADS-B");
-    b.push_str(&notes(&app, now));
+    b.push_str(&banners(&notes(&app, now)));
     b.push_str("<p>Last:");
     for m in [1, 5, 15] {
         if m == minutes {
@@ -724,7 +736,7 @@ fn shown(app: &App, r: &crate::store::FixRow) -> bool {
     map::shown(app.cfg.fusion.show_unmatched, r)
 }
 
-fn clock(ms: i64) -> String {
+pub(crate) fn clock(ms: i64) -> String {
     format!("{} UTC", &ms_to_rfc3339(ms)[11..19])
 }
 
@@ -739,7 +751,7 @@ fn map_opts(app: &App) -> map::Opts {
 async fn map_page(State(app): State<Arc<App>>) -> Result<Html<String>, Fail> {
     let now = now_ms();
     let mut b = heading("Map");
-    b.push_str(&notes(&app, now));
+    b.push_str(&banners(&notes(&app, now)));
     let view = app.live().view.clone();
     let Some(v) = view else {
         let why = if app.cfg.fusion.enabled {
@@ -864,7 +876,9 @@ async fn map_json(State(app): State<Arc<App>>) -> Response {
         app.cfg.stats.show_aircraft_ids,
         app.cfg.fusion.show_unmatched,
     );
-    Json(map::api(&v, ids, show_unmatched)).into_response()
+    let mut j = map::api(&v, ids, show_unmatched);
+    j["generated"] = json!(now_ms());
+    Json(j).into_response()
 }
 
 fn sites_section(app: &App) -> Result<String, Fail> {
@@ -979,7 +993,7 @@ fn mesh_section(app: &App, now: i64) -> Result<String, Fail> {
 async fn setup_page(State(app): State<Arc<App>>) -> Result<Html<String>, Fail> {
     let now = now_ms();
     let mut b = heading("Setup");
-    b.push_str(&notes(&app, now));
+    b.push_str(&banners(&notes(&app, now)));
     b.push_str(
         "<p>A passive radar transmits nothing. One antenna listens to a broadcast transmitter (the \
          reference channel); a second, coherent channel listens for the same signal bouncing off aircraft \
@@ -1023,13 +1037,16 @@ async fn stats_json(
 ) -> Result<Json<Value>, Fail> {
     let now = now_ms();
     let (active, hours_back) = window(&q);
-    let (from_hour, _) = first_hour(&app, now, hours_back);
+    let (from_hour, changed) = first_hour(&app, now, hours_back);
     let st = &app.cfg.stats;
     let s = summary(&app.db(), from_hour, st.bin_km)?;
     let (judged, seen) = aircraft_seen(&s.planes, st.min_opportunities, st.detected_hits);
+    let setup = app.live().setup.clone();
+    let u = unmatched(&app, &s, setup.as_ref());
     let planes: Vec<Value> = s
         .planes
         .iter()
+        .take(LISTED)
         .enumerate()
         .map(|(n, p)| {
             let mut v = json!({"opportunities": p.opps, "hits": p.hits, "pd": pd(p.hits, p.opps),
@@ -1047,21 +1064,143 @@ async fn stats_json(
         "experimental": true,
         "window": active,
         "from": from_hour * HOUR,
+        "setup_changed": changed,
         "generated": now,
         "cpis": s.cpis,
         "detections": s.dets,
         "unmatched": s.unmatched,
+        "unmatched_per_cpi": u.as_ref().map(|u| u.per_cpi),
+        "unmatched_per_min": u.as_ref().and_then(|u| u.per_min),
+        "chance_pd": u.as_ref().and_then(|u| u.chance_pd),
         "opportunities": s.opps,
         "hits": s.hits,
         "pd": pd(s.hits, s.opps),
         "aircraft_judged": judged,
         "aircraft_detected": seen,
+        "detected_hits": st.detected_hits,
+        "min_opportunities": st.min_opportunities,
         "reliable_km": reliable_km(&s.bins, st.pd_threshold, st.min_opportunities),
         "pd_threshold": st.pd_threshold,
         "bins": s.bins.iter().map(|b| json!({"from_km": b.from, "to_km": b.to,
             "opportunities": b.opps, "hits": b.hits, "pd": b.pd()})).collect::<Vec<_>>(),
         "aircraft": planes,
+        "aircraft_total": s.planes.len(),
         "multi_site": fix_json(&fix_stats(&app.db(), (from_hour * HOUR).max(now - KEEP_FIXES_MS))?),
+    })))
+}
+
+/// A site's geometry as the API gives it: blah2's setup, as in `radar.site`, and the
+/// baseline.
+fn geometry(s: &Setup) -> Value {
+    let mut g = crate::reports::site_payload(s);
+    g["baseline_km"] = json!(s.pair().baseline() / 1000.0);
+    g
+}
+
+/// Another station's site as the setup page shows it: the receiver to about 100 m and the
+/// transmitter by name, not the exact positions its `radar.site` event carries.
+fn station_site(g: &SiteGeo) -> Value {
+    let su = &g.setup;
+    let round = |x: f64| (x * 1000.0).round() / 1000.0;
+    json!({
+        "rx": {"name": su.rx.name, "latitude": round(su.rx.latitude),
+            "longitude": round(su.rx.longitude)},
+        "tx": {"name": su.tx.name},
+        "fc_hz": su.fc,
+        "cpi_s": su.cpi_s,
+        "baseline_km": su.pair().baseline() / 1000.0,
+        "since": g.since,
+    })
+}
+
+/// A station's reports in the window, if it sent any, and its site, if it logged one.
+fn station_json(here: bool, r: Option<&Station>, site: Option<&SiteGeo>) -> Value {
+    let none = Station::default();
+    let r = r.unwrap_or(&none);
+    let sent = r.reports > 0;
+    json!({
+        "call": site.map_or(&r.call, |s| &s.call),
+        "here": here,
+        "reports": r.reports,
+        "cpis": r.cpis,
+        "detections": r.dets,
+        "left_out": r.dropped,
+        "bytes": r.bytes,
+        "unreadable": r.unreadable,
+        "first": sent.then_some(r.first),
+        "last": sent.then_some(r.last),
+        "every_s": r.every_ms().map(|ms| ms as f64 / 1000.0),
+        "kbps": r.kbps(),
+        "site": site.map(station_site),
+    })
+}
+
+/// Every station that logged a site or sent reports, by callsign, once each; `me` is this
+/// station's key.
+fn stations_json(sites: &[SiteGeo], reports: &[Station], me: Option<&str>) -> Vec<Value> {
+    let mut keys: Vec<(&str, &str)> = sites
+        .iter()
+        .map(|s| (s.call.as_str(), s.key.as_str()))
+        .chain(reports.iter().map(|s| (s.call.as_str(), s.key.as_str())))
+        .collect();
+    keys.sort_unstable();
+    let mut seen = std::collections::HashSet::new();
+    keys.retain(|(_, k)| seen.insert(*k));
+    keys.into_iter()
+        .map(|(_, k)| {
+            station_json(
+                me == Some(k),
+                reports.iter().find(|s| s.key == k),
+                sites.iter().find(|s| s.key == k),
+            )
+        })
+        .collect()
+}
+
+/// The setup page's facts: this site's feeds and reports, and every radar station heard
+/// on the mesh in the last 24 hours.
+async fn setup_json(State(app): State<Arc<App>>) -> Result<Json<Value>, Fail> {
+    let now = now_ms();
+    // a hung core mustn't hold up the answer; it only names this station
+    let who = tokio::time::timeout(Duration::from_millis(1500), app.whoami())
+        .await
+        .ok()
+        .and_then(Result::ok);
+    let notes = notes(&app, now);
+    let from = now - 24 * HOUR;
+    let (sites, reports) = {
+        let db = app.db();
+        (
+            crate::reports::sites(&db)?,
+            crate::reports::stations(&db, from)?,
+        )
+    };
+    let me = who.as_ref().map(|w| w.key.as_str());
+    let stations = stations_json(&sites, &reports, me);
+    let live = app.live();
+    let (m, f) = (&app.cfg.mesh, &app.cfg.fusion);
+    Ok(Json(json!({
+        "experimental": true,
+        "generated": now,
+        "who": who.map(|w| json!({"call": w.call, "node": w.node})),
+        "notes": notes,
+        "site": live.setup.as_ref().map(geometry),
+        "blah2": {"url": app.cfg.blah2.url, "error": live.blah2_err,
+            "config_error": live.setup_err, "last_cpi": live.last_cpi},
+        "timing": live.timing.as_ref().map(|t| json!({"cpi_ms": t.cpi_ms, "n_cpi": t.n_cpi,
+            "uptime_s": t.uptime_s})),
+        "adsb": {"url": app.cfg.adsb.url, "error": live.adsb_err, "last_ok": live.adsb_ok,
+            "aircraft": live.tracks.len(), "max_age_s": app.cfg.adsb.max_age_s},
+        "mesh": {"enabled": m.enabled, "batch_s": m.batch_s, "max_kbps": m.max_kbps,
+            "bytes_allowed": crate::reports::bytes_allowed(m.batch_s, m.max_kbps),
+            "max_per_batch": m.max_per_batch, "error": live.mesh_err,
+            "last_report": live.last_report.map(|(at, kept, left)| {
+                json!({"at": at, "kept": kept, "left_out": left})
+            })},
+        "fusion": {"enabled": f.enabled, "every_s": f.every_s, "settle_s": f.settle_s,
+            "show_unmatched": f.show_unmatched},
+        "stations_from": from,
+        "stations": stations,
     })))
 }
 
@@ -1084,6 +1223,58 @@ mod tests {
         assert_eq!(window(&q("<script>")), ("24h", 24));
         assert_eq!(window(&HashMap::new()), ("24h", 24));
         assert!(window_links("7d").contains("<b>7 days</b>"));
+    }
+
+    #[test]
+    fn stations_list_each_once_with_whatever_they_sent() {
+        let setup =
+            crate::blah2::parse_config(include_str!("../fixtures/blah2-config.json")).unwrap();
+        let site = |key: &str, call: &str| SiteGeo {
+            key: key.into(),
+            call: call.into(),
+            since: 1_000,
+            setup: setup.clone(),
+        };
+        let sent = |key: &str, call: &str| Station {
+            key: key.into(),
+            call: call.into(),
+            reports: 3,
+            dets: 900,
+            dropped: 120,
+            bytes: 22_500,
+            first: 1_000,
+            last: 121_000,
+            ..Default::default()
+        };
+        // a site and its reports, a site that sent nothing yet, reports with no site
+        let sites = [site("bb", "N0CALL-2"), site("aa", "N0CALL-1")];
+        let reports = [sent("cc", "N0CALL-3"), sent("aa", "N0CALL-1")];
+        let j = stations_json(&sites, &reports, Some("aa"));
+        let calls: Vec<&str> = j.iter().map(|s| s["call"].as_str().unwrap()).collect();
+        assert_eq!(calls, ["N0CALL-1", "N0CALL-2", "N0CALL-3"]);
+        assert_eq!(j[0]["here"], true);
+        assert_eq!(
+            (&j[0]["left_out"], &j[0]["every_s"], &j[0]["kbps"]),
+            (&json!(120), &json!(60.0), &json!(1.0))
+        );
+        assert_eq!(j[0]["site"]["since"], 1_000);
+        // positions as the setup page shows them, not as each site logged them
+        assert_eq!(
+            j[0]["site"]["rx"],
+            json!({"name": "Adelaide", "latitude": -34.929, "longitude": 138.6})
+        );
+        assert_eq!(j[0]["site"]["tx"], json!({"name": "Mount Lofty"}));
+        assert_eq!(
+            (&j[1]["here"], &j[1]["reports"], &j[1]["last"]),
+            (&json!(false), &json!(0), &json!(null)),
+            "logged a site, sent nothing yet"
+        );
+        assert_eq!(j[2]["site"], json!(null), "reports, but no site logged");
+        assert!(
+            stations_json(&sites, &reports, None)
+                .iter()
+                .all(|s| s["here"] == false)
+        );
     }
 
     #[test]

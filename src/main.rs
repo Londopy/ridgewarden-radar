@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -8,7 +9,7 @@ use clap::{Parser, Subcommand};
 use ridgewarden_radar::app::App;
 use ridgewarden_radar::config::{Config, EXAMPLE};
 use ridgewarden_radar::sim::{self, Plan, SitePlan};
-use ridgewarden_radar::{spawn_loops, web};
+use ridgewarden_radar::{spawn_loops, top, web};
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +34,16 @@ enum Cmd {
     Init,
     /// Read blah2 and the ADS-B feed, keep the statistics, serve the pages
     Run,
+    /// Watch this site live in the terminal: its feeds, the mesh's radar sites and their
+    /// reports, tracks, fixes and the statistics
+    Top {
+        /// the app's pages, on this box or another
+        #[arg(long, default_value = "http://127.0.0.1:8802")]
+        url: String,
+        /// seconds between reads
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=600))]
+        every: u64,
+    },
     /// Stand in for blah2 and an ADS-B receiver with synthetic aircraft (no config needed)
     Simulate {
         /// a site's blah2 API and aircraft.json; repeat for more sites
@@ -72,13 +83,16 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ridgewarden_radar=info,ridgewarden_client=info".into()),
-        )
-        .init();
     let cli = Cli::parse();
+    // top draws the whole terminal, so a log line would land in the middle of it
+    if !matches!(cli.cmd, Cmd::Top { .. }) {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "ridgewarden_radar=info,ridgewarden_client=info".into()),
+            )
+            .init();
+    }
     match cli.cmd {
         Cmd::Init => {
             if cli.config.exists() {
@@ -98,6 +112,7 @@ fn main() -> Result<()> {
             let cfg = Config::load(&cli.config)?;
             tokio::runtime::Runtime::new()?.block_on(run(cfg))
         }
+        Cmd::Top { url, every } => top::run(&url, Duration::from_secs(every)),
         Cmd::Simulate {
             listen,
             rx,
